@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"path/filepath"
 	"sync"
@@ -336,6 +337,147 @@ func TestRefusesNewerSchema(t *testing.T) {
 
 	if _, err := Open(path, Options{}); err == nil {
 		t.Error("opened a database from a newer schema version instead of refusing")
+	}
+}
+
+// --- retention ---------------------------------------------------------------
+
+// seedAlerts writes n alerts one minute apart starting at base.
+func seedAlerts(t *testing.T, s *Store, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		s.Enqueue(alert(fmt.Sprintf("id-%05d", i), model.SevMedium, base.Add(time.Duration(i)*time.Minute)))
+	}
+	waitForWrites(t, s, uint64(n))
+}
+
+func TestPruneByAge(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+
+	// 100 alerts, one per minute, so the cutoff is easy to reason about.
+	seedAlerts(t, s, 100)
+
+	removed, err := s.Prune(ctx, base.Add(40*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 40 {
+		t.Errorf("pruned %d alerts, want 40", removed)
+	}
+
+	left, err := s.CountAlerts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left != 60 {
+		t.Errorf("%d alerts remain, want 60", left)
+	}
+
+	// What survived must be the newest, not an arbitrary 60.
+	got, err := s.Alerts(ctx, Query{Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range got {
+		if a.Time.Before(base.Add(40 * time.Minute)) {
+			t.Fatalf("alert from %v survived a cutoff at %v", a.Time, base.Add(40*time.Minute))
+		}
+	}
+}
+
+// TestPruneToCount covers the ceiling that age alone does not give. During an
+// incident a single hour can produce more findings than a normal month, so a
+// time-based policy is not a bound.
+func TestPruneToCount(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+
+	seedAlerts(t, s, 500)
+
+	removed, err := s.PruneToCount(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 400 {
+		t.Errorf("pruned %d, want 400", removed)
+	}
+
+	got, err := s.Alerts(ctx, Query{Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 100 {
+		t.Fatalf("%d alerts remain, want 100", len(got))
+	}
+	// The 100 kept must be the 100 newest.
+	oldestKept := got[len(got)-1].Time
+	if want := base.Add(400 * time.Minute); !oldestKept.Equal(want) {
+		t.Errorf("oldest surviving alert is %v, want %v", oldestKept, want)
+	}
+}
+
+func TestPruneToCountRejectsNegative(t *testing.T) {
+	if _, err := openTemp(t).PruneToCount(context.Background(), -1); err == nil {
+		t.Error("a negative keep count was accepted")
+	}
+}
+
+func TestPruneOnEmptyDatabase(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+
+	if n, err := s.Prune(ctx, base); err != nil || n != 0 {
+		t.Errorf("prune on an empty database returned (%d, %v)", n, err)
+	}
+	if n, err := s.PruneToCount(ctx, 10); err != nil || n != 0 {
+		t.Errorf("prune-to-count on an empty database returned (%d, %v)", n, err)
+	}
+}
+
+// TestVacuumReclaimsSpace documents the behaviour that makes Vacuum a separate
+// call: deleting rows frees pages for reuse but does not shrink the file.
+func TestVacuumReclaimsSpace(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+
+	seedAlerts(t, s, 2000)
+
+	full, err := s.SizeOnDisk(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PruneToCount(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+
+	afterPrune, err := s.SizeOnDisk(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterPrune < full {
+		t.Errorf("the file shrank from %d to %d without a vacuum; "+
+			"if SQLite now does this automatically the documentation needs updating", full, afterPrune)
+	}
+
+	if err := s.Vacuum(ctx); err != nil {
+		t.Fatal(err)
+	}
+	afterVacuum, err := s.SizeOnDisk(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterVacuum >= afterPrune {
+		t.Errorf("vacuum did not reclaim space: %d before, %d after", afterPrune, afterVacuum)
+	}
+
+	// And the surviving rows are still readable.
+	got, err := s.Alerts(ctx, Query{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 10 {
+		t.Errorf("%d alerts survived the vacuum, want 10", len(got))
 	}
 }
 
