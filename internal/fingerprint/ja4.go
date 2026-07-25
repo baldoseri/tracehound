@@ -185,6 +185,15 @@ func twoDigit(n int) string { return string(appendTwoDigit(nil, n)) }
 //	"http/1.1"  -> "h1"   (longer values collapse to first and last)
 //	non-ASCII   -> "99"
 //
+// A client chooses its own ALPN strings, so this field can contain anything
+// printable, including the "_" that separates JA4's own fields. The reference
+// implementation does not escape that and neither does this, because a
+// fingerprint that disagrees with other tooling is worse than an awkward one:
+// its only job is to be compared. The consequence is that a JA4 must be parsed
+// from the right, where the two trailing fields are fixed-width hex, rather
+// than by splitting on the delimiter. Nothing here parses one back apart, and
+// anything downstream that starts to will need to know this.
+//
 // Both the single-character and the non-ASCII case were wrong here until this
 // was checked against the reference: it used to double a one-character value
 // and hex-encode anything non-alphanumeric. Neither matches, and a fingerprint

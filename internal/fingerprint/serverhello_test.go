@@ -374,6 +374,9 @@ func TestParseServerHelloMalformedNeverPanics(t *testing.T) {
 func FuzzParseServerHello(f *testing.F) {
 	f.Add(buildServerHello(goldenServerSpec()))
 	f.Add(buildServerHello(shSpec{legacyVersion: 0x0303, cipher: 0xc030}))
+	delim := goldenServerSpec()
+	delim.alpn = "0_" // a delimiter inside field a; see splitFingerprint
+	f.Add(buildServerHello(delim))
 	f.Add([]byte{0x16, 0x03, 0x03, 0x00, 0x00})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -385,14 +388,15 @@ func FuzzParseServerHello(f *testing.F) {
 			t.Fatal("nil ServerHello with nil error")
 		}
 		// Structural rather than a fixed width, because a one-character ALPN
-		// legitimately shortens the first field.
+		// legitimately shortens the first field, and parsed from the right
+		// because a hostile ALPN can put a delimiter inside the first one.
 		got := JA4S(sh, TransportTCP)
-		parts := strings.Split(got, "_")
-		if len(parts) != 3 {
+		_, cipher, hash, ok := splitFingerprint(got)
+		if !ok {
 			t.Fatalf("JA4S %q does not have three fields", got)
 		}
-		if len(parts[1]) != 4 || len(parts[2]) != 12 {
-			t.Fatalf("JA4S %q: cipher is %d and hash is %d characters", got, len(parts[1]), len(parts[2]))
+		if len(cipher) != 4 || len(hash) != 12 {
+			t.Fatalf("JA4S %q: cipher is %d and hash is %d characters", got, len(cipher), len(hash))
 		}
 	})
 }

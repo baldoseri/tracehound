@@ -334,6 +334,12 @@ func TestALPNCode(t *testing.T) {
 		{[]string{"\xff"}, "99"},
 		// Two ASCII bytes are used verbatim whatever they are.
 		{[]string{"\x00\x0b"}, "\x00\x0b"},
+		// Including the field delimiter. A client picks its own ALPN strings,
+		// so this is reachable by anyone who wants it, and the reference
+		// implementation passes it through too. See splitFingerprint.
+		{[]string{"_"}, "_"},
+		{[]string{"0_"}, "0_"},
+		{[]string{"0abcdef_"}, "0_"}, // arrives via the first-and-last collapse
 	}
 	for _, tc := range tests {
 		if got := alpnCode(tc.alpn); got != tc.want {
@@ -614,11 +620,66 @@ func TestParseMalformedNeverPanics(t *testing.T) {
 // arbitrary input. Run with:
 //
 //	go test -fuzz=FuzzParseClientHello ./internal/fingerprint
+//
+// splitFingerprint separates a JA4 or JA4S into its three fields, scanning from
+// the right because that is the only way that always works. The ALPN is copied
+// from the wire into the first field, so a client offering "_" as a protocol
+// name, or any name whose first and last bytes collapse to include one, puts a
+// delimiter inside field a. FoxIO's reference implementation does not filter
+// that and neither does this package, on the grounds that a fingerprint which
+// disagrees with other tooling is worse than an awkward one. Splitting from the
+// left would mis-parse those; splitting from the right cannot, because the two
+// trailing fields are fixed-width hex.
+//
+// Nothing in tracehound outside these tests parses a fingerprint. It is a map
+// key and a stored string, which is why this lives in the test file: it exists
+// to state the invariant, not to be called in anger.
+func splitFingerprint(fp string) (a, b, c string, ok bool) {
+	i := strings.LastIndexByte(fp, '_')
+	if i < 0 {
+		return "", "", "", false
+	}
+	j := strings.LastIndexByte(fp[:i], '_')
+	if j < 0 {
+		return "", "", "", false
+	}
+	return fp[:j], fp[j+1 : i], fp[i+1:], true
+}
+
+// TestFingerprintSurvivesDelimiterInALPN pins the behaviour the fuzzer found:
+// a hostile ALPN puts a literal underscore in field a, and the fingerprint is
+// still recoverable as long as it is parsed from the right.
+func TestFingerprintSurvivesDelimiterInALPN(t *testing.T) {
+	for _, alpn := range []string{"_", "0_", "0abcdef_", "__"} {
+		s := goldenSpec()
+		s.alpn = []string{alpn}
+		ch, err := ParseClientHello(buildHello(s))
+		if err != nil {
+			t.Fatalf("ALPN %q: %v", alpn, err)
+		}
+		ja4 := JA4(ch, TransportTCP)
+		a, b, c, ok := splitFingerprint(ja4)
+		if !ok {
+			t.Fatalf("ALPN %q: JA4 %q has fewer than three fields", alpn, ja4)
+		}
+		if !strings.Contains(a, "_") {
+			t.Errorf("ALPN %q: expected a delimiter inside field a, got %q", alpn, a)
+		}
+		if len(b) != 12 || len(c) != 12 {
+			t.Errorf("ALPN %q: JA4 %q hashes are %d and %d characters", alpn, ja4, len(b), len(c))
+		}
+	}
+}
+
 func FuzzParseClientHello(f *testing.F) {
 	f.Add(buildHello(goldenSpec()))
 	s := goldenSpec()
 	s.sni, s.alpn = "", nil
 	f.Add(buildHello(s))
+	// The input that caught the delimiter case, kept so it stays covered.
+	d := goldenSpec()
+	d.alpn = []string{"0_"}
+	f.Add(buildHello(d))
 	f.Add([]byte{0x16, 0x03, 0x01, 0x00, 0x00})
 	f.Add([]byte("not tls at all"))
 
@@ -634,15 +695,15 @@ func FuzzParseClientHello(f *testing.F) {
 		// structurally rather than as a fixed number, because a
 		// one-character ALPN legitimately makes the first field one shorter.
 		ja4 := JA4(ch, TransportTCP)
-		parts := strings.Split(ja4, "_")
-		if len(parts) != 3 {
+		a, b, c, ok := splitFingerprint(ja4)
+		if !ok {
 			t.Fatalf("JA4 %q does not have three fields", ja4)
 		}
-		if len(parts[0]) < 9 || len(parts[0]) > 10 {
-			t.Fatalf("JA4 %q: first field is %d characters", ja4, len(parts[0]))
+		if len(a) < 9 || len(a) > 10 {
+			t.Fatalf("JA4 %q: first field is %d characters", ja4, len(a))
 		}
-		if len(parts[1]) != 12 || len(parts[2]) != 12 {
-			t.Fatalf("JA4 %q: hash fields are %d and %d characters", ja4, len(parts[1]), len(parts[2]))
+		if len(b) != 12 || len(c) != 12 {
+			t.Fatalf("JA4 %q: hash fields are %d and %d characters", ja4, len(b), len(c))
 		}
 		_, _ = JA3(ch)
 	})
