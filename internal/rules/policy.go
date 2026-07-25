@@ -197,12 +197,13 @@ func (s *Set) exfilConfig() (detect.ExfilConfig, error) {
 }
 
 type inventoryTuning struct {
-	MinHostsForRarity        int  `yaml:"min_hosts_for_rarity"`
-	MinFingerprintsForRarity int  `yaml:"min_fingerprints_for_rarity"`
-	MinSharedFingerprints    int  `yaml:"min_shared_fingerprints"`
-	MinObservations          int  `yaml:"min_observations"`
-	MaxDevices               int  `yaml:"max_devices"`
-	SilenceNewDevice         bool `yaml:"silence_new_device"`
+	MinHostsForRarity        int      `yaml:"min_hosts_for_rarity"`
+	MinFingerprintsForRarity int      `yaml:"min_fingerprints_for_rarity"`
+	MinSharedFingerprints    int      `yaml:"min_shared_fingerprints"`
+	MinObservations          int      `yaml:"min_observations"`
+	MinAge                   Duration `yaml:"min_age"`
+	MaxDevices               int      `yaml:"max_devices"`
+	SilenceNewDevice         bool     `yaml:"silence_new_device"`
 }
 
 func (s *Set) inventoryConfig() (detect.InventoryConfig, error) {
@@ -215,6 +216,7 @@ func (s *Set) inventoryConfig() (detect.InventoryConfig, error) {
 		MinFingerprintsForRarity: t.MinFingerprintsForRarity,
 		MinSharedFingerprints:    t.MinSharedFingerprints,
 		MinObservations:          t.MinObservations,
+		MinAge:                   t.MinAge.Std(),
 		MaxDevices:               t.MaxDevices,
 		SilenceNewDevice:         t.SilenceNewDevice,
 	}

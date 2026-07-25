@@ -40,6 +40,12 @@ tuning:
   # connection from one host is not evidence of anything.
   min_observations: 3
 
+  # How long a fingerprint must have been known before it can be called rare.
+  # Without this the detector reports whichever machine updated its browser
+  # first: a genuinely new stack is used by exactly one host for a while, and
+  # is indistinguishable from an implant until a second host adopts it.
+  min_age: 10m
+
 exceptions:
   - description: Build agents run tooling nothing else on the network runs
     src: 10.0.70.0/24

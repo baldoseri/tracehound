@@ -559,12 +559,20 @@ const (
 	ja4Implant = "t12i040400_implant00000_implant00000"
 )
 
-// seedTLSHost registers a host and attributes n completed TLS flows to it.
+// seedTLSHost registers a host and attributes n completed TLS flows to it,
+// starting at t0.
 func seedTLSHost(e *Engine, host netip.Addr, ja4 string, n int) {
-	p := tcpPacket(host, 51000, outside, 443, model.TCPSyn, t0)
+	seedTLSHostAt(e, host, ja4, n, t0)
+}
+
+// seedTLSHostAt is the same but lets a test control when the fingerprint was
+// first observed, which the rarity age guard depends on.
+func seedTLSHostAt(e *Engine, host netip.Addr, ja4 string, n int, first time.Time) {
+	p := tcpPacket(host, 51000, outside, 443, model.TCPSyn, first)
 	e.Packet(&p, nil, true)
 	for i := 0; i < n; i++ {
 		f := outboundFlow(host, uint16(51000+i), outside, 443)
+		f.FirstSeen, f.LastSeen = first, first
 		f.JA4 = ja4
 		e.FlowClosed(&f)
 	}
@@ -584,7 +592,8 @@ func TestInventoryFlagsRareJA4(t *testing.T) {
 	implant := netip.MustParseAddr("10.0.0.66")
 	seedTLSHost(e, implant, ja4Implant, 5)
 
-	e.Tick(t0.Add(time.Minute))
+	// Well past the age guard: every fingerprint here has been known since t0.
+	e.Tick(t0.Add(30 * time.Minute))
 
 	if got := len(in.Devices()); got != 6 {
 		t.Errorf("inventory holds %d devices, want 6", got)
@@ -602,9 +611,42 @@ func TestInventoryFlagsRareJA4(t *testing.T) {
 	}
 
 	// Ticking again must not re-report the same fingerprint.
-	e.Tick(t0.Add(2 * time.Minute))
+	e.Tick(t0.Add(40 * time.Minute))
 	if got := col.byRule(RuleRareJA4); len(got) != 1 {
 		t.Errorf("rare fingerprint reported %d times across two ticks, want 1", len(got))
+	}
+}
+
+// TestInventoryWaitsForFingerprintToAge is the regression test for a false
+// positive found by adding HTTP/3 traffic to the demo capture.
+//
+// Three workstations used a browser preferring QUIC, but they did not all start
+// at once. The first one to do so presented a fingerprint no other host had yet,
+// the network baseline already existed from the TCP stacks, and the detector
+// reported an ordinary browser as an implant. A new stack is not a rare stack.
+func TestInventoryWaitsForFingerprintToAge(t *testing.T) {
+	in := NewInventory(InventoryConfig{SilenceNewDevice: true})
+	e, col := newTestEngine(in)
+
+	// An established fleet, known since the start of the capture.
+	seedTLSHost(e, netip.MustParseAddr("10.0.0.41"), ja4Chrome, 4)
+	seedTLSHost(e, netip.MustParseAddr("10.0.0.42"), ja4Chrome, 4)
+	seedTLSHost(e, netip.MustParseAddr("10.0.0.43"), ja4Chrome, 4)
+	seedTLSHost(e, netip.MustParseAddr("10.0.0.44"), ja4Firefox, 4)
+	seedTLSHost(e, netip.MustParseAddr("10.0.0.45"), ja4Firefox, 4)
+
+	// A stack that only turns up 25 minutes in, on one host so far.
+	newcomer := netip.MustParseAddr("10.0.0.46")
+	seedTLSHostAt(e, newcomer, ja4Implant, 5, t0.Add(25*time.Minute))
+
+	e.Tick(t0.Add(26 * time.Minute)) // one minute old
+	if got := col.byRule(RuleRareJA4); len(got) != 0 {
+		t.Errorf("reported a fingerprint %v after it first appeared", time.Minute)
+	}
+
+	e.Tick(t0.Add(40 * time.Minute)) // now fifteen minutes old
+	if got := col.byRule(RuleRareJA4); len(got) != 1 {
+		t.Errorf("got %d alerts once the fingerprint had aged, want 1", len(got))
 	}
 }
 
@@ -646,7 +688,9 @@ func TestInventoryRequiresRepeatedObservations(t *testing.T) {
 	// One host, one connection, an unusual stack: not enough to accuse anyone.
 	seedTLSHost(e, netip.MustParseAddr("10.0.0.36"), ja4Implant, 1)
 
-	e.Tick(t0.Add(time.Minute))
+	// Ticked well past the age guard so this test fails on the observation
+	// count rather than passing for an unrelated reason.
+	e.Tick(t0.Add(30 * time.Minute))
 
 	if got := col.byRule(RuleRareJA4); len(got) != 0 {
 		t.Errorf("alerted on a fingerprint observed exactly once")

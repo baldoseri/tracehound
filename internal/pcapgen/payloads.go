@@ -82,8 +82,40 @@ func implantHello(sni string) []byte {
 	})
 }
 
-// buildHello renders a spec into a complete TLS record containing a ClientHello.
+// h3Handshake is a browser profile offering ALPN h3, returned as a bare
+// handshake message rather than wrapped in a TLS record.
+//
+// QUIC carries the handshake in CRYPTO frames, so there is no record layer to
+// wrap it in. Everything else about the profile matches what the same browser
+// would send over TCP, which is what makes the two fingerprints comparable
+// apart from JA4's leading transport character.
+func h3Handshake(sni string) []byte {
+	return buildHandshake(helloSpec{
+		legacyVersion:     0x0303,
+		grease:            true,
+		ciphers:           []uint16{0x1301, 0x1302, 0x1303},
+		sni:               sni,
+		alpn:              []string{"h3"},
+		sigAlgs:           []uint16{0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501},
+		groups:            []uint16{0x001d, 0x0017, 0x0018},
+		pointFormats:      []uint8{0x00},
+		supportedVersions: []uint16{0x0304},
+	})
+}
+
+// buildHello renders a spec into a complete TLS record containing a ClientHello,
+// which is how TLS over TCP frames it.
 func buildHello(s helloSpec) []byte {
+	var rec builder
+	rec.u8(0x16) // handshake content type
+	rec.u16(0x0301)
+	rec.lenPrefixed(2, func(w *builder) { w.raw(buildHandshake(s)) })
+	return rec.b
+}
+
+// buildHandshake renders a spec into a bare ClientHello handshake message with
+// no record layer, which is how QUIC carries it in CRYPTO frames.
+func buildHandshake(s helloSpec) []byte {
 	var body builder
 	body.u16(s.legacyVersion)
 	body.raw(make([]byte, 32)) // random; zeros keep the capture reproducible
@@ -176,12 +208,7 @@ func buildHello(s helloSpec) []byte {
 	var hs builder
 	hs.u8(0x01) // ClientHello
 	hs.lenPrefixed(3, func(w *builder) { w.raw(body.b) })
-
-	var rec builder
-	rec.u8(0x16) // handshake
-	rec.u16(0x0301)
-	rec.lenPrefixed(2, func(w *builder) { w.raw(hs.b) })
-	return rec.b
+	return hs.b
 }
 
 // --- DNS --------------------------------------------------------------------

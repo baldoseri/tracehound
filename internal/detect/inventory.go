@@ -36,6 +36,15 @@ type InventoryConfig struct {
 	// MinObservations is how many flows a fingerprint must appear on before its
 	// rarity counts. One connection from one host is not evidence of anything.
 	MinObservations int
+	// MinAge is how long a fingerprint must have been known before it may be
+	// called rare.
+	//
+	// Without this the detector reports the first host to use any new stack.
+	// A browser that prefers HTTP/3 produces a fingerprint nobody has yet, and
+	// for the few minutes before a second machine happens to use it, it is
+	// indistinguishable from an implant. Rarity is a claim about the network
+	// over time, so it needs time to be true.
+	MinAge time.Duration
 	// MaxDevices bounds the inventory.
 	MaxDevices int
 	// SilenceNewDevice suppresses the informational new-host alert. Phrased as
@@ -54,6 +63,7 @@ func DefaultInventoryConfig() InventoryConfig {
 		MinFingerprintsForRarity: 3,
 		MinSharedFingerprints:    2,
 		MinObservations:          3,
+		MinAge:                   10 * time.Minute,
 		MaxDevices:               100_000,
 	}
 }
@@ -72,9 +82,15 @@ type Inventory struct {
 
 	mu       sync.Mutex
 	devices  map[netip.Addr]*model.Device
-	ja4Hosts map[string]map[netip.Addr]struct{}
-	ja4Flows map[string]int
+	ja4      map[string]*ja4Info
 	reported map[string]struct{}
+}
+
+// ja4Info is what is known about one TLS fingerprint.
+type ja4Info struct {
+	hosts map[netip.Addr]struct{}
+	flows int
+	first time.Time
 }
 
 // NewInventory returns an inventory detector. A zero config selects defaults.
@@ -92,6 +108,9 @@ func NewInventory(cfg InventoryConfig) *Inventory {
 	if cfg.MinObservations > 0 {
 		d.MinObservations = cfg.MinObservations
 	}
+	if cfg.MinAge > 0 {
+		d.MinAge = cfg.MinAge
+	}
 	if cfg.MaxDevices > 0 {
 		d.MaxDevices = cfg.MaxDevices
 	}
@@ -99,8 +118,7 @@ func NewInventory(cfg InventoryConfig) *Inventory {
 	return &Inventory{
 		cfg:      d,
 		devices:  make(map[netip.Addr]*model.Device),
-		ja4Hosts: make(map[string]map[netip.Addr]struct{}),
-		ja4Flows: make(map[string]int),
+		ja4:      make(map[string]*ja4Info),
 		reported: make(map[string]struct{}),
 	}
 }
@@ -185,13 +203,16 @@ func (in *Inventory) OnFlowClosed(c *Context, f *model.Flow) {
 	if !slices.Contains(dev.JA4s, f.JA4) {
 		dev.JA4s = append(dev.JA4s, f.JA4)
 	}
-	hosts, ok := in.ja4Hosts[f.JA4]
+	info, ok := in.ja4[f.JA4]
 	if !ok {
-		hosts = make(map[netip.Addr]struct{})
-		in.ja4Hosts[f.JA4] = hosts
+		info = &ja4Info{hosts: make(map[netip.Addr]struct{}), first: f.FirstSeen}
+		in.ja4[f.JA4] = info
 	}
-	hosts[f.Client] = struct{}{}
-	in.ja4Flows[f.JA4]++
+	if f.FirstSeen.Before(info.first) {
+		info.first = f.FirstSeen
+	}
+	info.hosts[f.Client] = struct{}{}
+	info.flows++
 }
 
 // OnTick looks for fingerprints unique to a single host.
@@ -200,7 +221,7 @@ func (in *Inventory) OnTick(c *Context, now time.Time) {
 
 	// Without a baseline, "rare" means nothing. Wait until the network has
 	// shown enough hosts and enough distinct stacks to have an opinion.
-	if len(in.devices) < in.cfg.MinHostsForRarity || len(in.ja4Hosts) < in.cfg.MinFingerprintsForRarity {
+	if len(in.devices) < in.cfg.MinHostsForRarity || len(in.ja4) < in.cfg.MinFingerprintsForRarity {
 		in.mu.Unlock()
 		return
 	}
@@ -210,8 +231,8 @@ func (in *Inventory) OnTick(c *Context, now time.Time) {
 	// host" describes every fingerprint on the network — including the
 	// perfectly ordinary browser that simply connected first.
 	shared := 0
-	for _, hosts := range in.ja4Hosts {
-		if len(hosts) >= 2 {
+	for _, info := range in.ja4 {
+		if len(info.hosts) >= 2 {
 			shared++
 		}
 	}
@@ -226,24 +247,31 @@ func (in *Inventory) OnTick(c *Context, now time.Time) {
 	}
 	var found []finding
 
-	for ja4, hosts := range in.ja4Hosts {
-		if len(hosts) != 1 {
+	for ja4, info := range in.ja4 {
+		if len(info.hosts) != 1 {
 			continue
 		}
 		// A single connection proves nothing; a stack used repeatedly by
 		// exactly one host is the thing worth looking at.
-		if in.ja4Flows[ja4] < in.cfg.MinObservations {
+		if info.flows < in.cfg.MinObservations {
+			continue
+		}
+		// And it has to have been around long enough for a second host to
+		// plausibly have used it. Reporting a fingerprint the moment it appears
+		// means reporting whichever machine happened to upgrade its browser
+		// first, which is noise dressed up as a finding.
+		if now.Sub(info.first) < in.cfg.MinAge {
 			continue
 		}
 		if _, done := in.reported[ja4]; done {
 			continue
 		}
 		in.reported[ja4] = struct{}{}
-		for h := range hosts {
+		for h := range info.hosts {
 			found = append(found, finding{ja4, h})
 		}
 	}
-	totalJA4 := len(in.ja4Hosts)
+	totalJA4 := len(in.ja4)
 	totalHosts := len(in.devices)
 	in.mu.Unlock()
 

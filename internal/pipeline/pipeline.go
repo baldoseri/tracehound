@@ -20,6 +20,7 @@ import (
 	"github.com/baldoseri/tracehound/internal/fingerprint"
 	"github.com/baldoseri/tracehound/internal/flow"
 	"github.com/baldoseri/tracehound/internal/model"
+	"github.com/baldoseri/tracehound/internal/quic"
 )
 
 // Options configures a pipeline.
@@ -87,6 +88,7 @@ type Pipeline struct {
 	opts   Options
 	table  *flow.Table
 	reasm  *fingerprint.Reassembler
+	qreasm *quic.Reassembler
 	engine *detect.Engine
 
 	stats     Stats
@@ -102,6 +104,7 @@ func New(engine *detect.Engine, opts Options) *Pipeline {
 		engine: engine,
 		table:  flow.New(flow.Options{IdleTimeout: opts.FlowIdleTimeout, MaxFlows: opts.MaxFlows}),
 		reasm:  fingerprint.NewReassembler(0),
+		qreasm: quic.NewReassembler(0),
 	}
 }
 
@@ -195,13 +198,18 @@ func (p *Pipeline) pace(ts time.Time) {
 	}
 }
 
-// fingerprintTLS feeds client-to-server payload into the ClientHello
-// reassembler and copies any completed fingerprint onto the flow.
+// fingerprintTLS recovers a TLS client fingerprint from client-to-server
+// payload, over TCP or over QUIC, and copies the result onto the flow.
+//
+// Both transports end at the same ClientHello parser, so a client that speaks
+// HTTP/2 and HTTP/3 produces fingerprints that differ only in JA4's leading
+// transport character. Anything else would make the two incomparable and halve
+// the value of having them.
 func (p *Pipeline) fingerprintTLS(pkt *model.Packet, f *model.Flow) {
-	if pkt.Proto != model.ProtoTCP || len(pkt.Payload) == 0 {
+	if len(pkt.Payload) == 0 {
 		return
 	}
-	// A flow is fingerprinted once; after that the reassembler is not consulted
+	// A flow is fingerprinted once; after that neither reassembler is consulted
 	// again, so an established connection's data packets cost one comparison.
 	if f.JA4 != "" {
 		return
@@ -212,7 +220,16 @@ func (p *Pipeline) fingerprintTLS(pkt *model.Packet, f *model.Flow) {
 	}
 
 	key, _ := model.KeyFor(pkt)
-	res := p.reasm.Feed(key, pkt.Payload)
+
+	var res *fingerprint.Result
+	switch pkt.Proto {
+	case model.ProtoTCP:
+		res = p.reasm.Feed(key, pkt.Payload)
+	case model.ProtoUDP:
+		// QUIC Initials are padded to 1200 bytes, so ordinary UDP such as DNS
+		// is rejected on a length comparison before any key derivation.
+		res = p.qreasm.Feed(key, pkt.Payload)
+	}
 	if res == nil {
 		return
 	}
@@ -233,6 +250,7 @@ func (p *Pipeline) reap(now time.Time) {
 	for _, f := range p.table.Reap(now) {
 		p.engine.FlowClosed(&f)
 		p.reasm.Forget(f.Key)
+		p.qreasm.Forget(f.Key)
 	}
 }
 
@@ -246,6 +264,7 @@ func (p *Pipeline) finish(src capture.Source, start time.Time) {
 	for _, f := range p.table.Drain() {
 		p.engine.FlowClosed(&f)
 		p.reasm.Forget(f.Key)
+		p.qreasm.Forget(f.Key)
 	}
 	if !p.stats.LastPacket.IsZero() {
 		p.engine.Tick(p.stats.LastPacket)

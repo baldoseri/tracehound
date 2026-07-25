@@ -9,9 +9,9 @@ exfiltration, and shows the numbers behind every call it makes.
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 tracehound reads packets from a capture file or a live interface, assembles them into
-flows, fingerprints TLS clients with JA4, and reports attacker behaviour mapped to MITRE
-ATT&CK. It builds to a single static binary with no libpcap and no cgo, and the web
-dashboard is compiled into the executable.
+flows, fingerprints TLS clients with JA4 over both TCP and QUIC, and reports attacker
+behaviour mapped to MITRE ATT&CK. It builds to a single static binary with no libpcap
+and no cgo, and the web dashboard is compiled into the executable.
 
 ![tracehound analysing a capture](docs/demo.gif)
 
@@ -166,6 +166,35 @@ Hellos are reassembled, and there is a test that feeds one through a byte per se
 because splitting a handshake into minimal segments is a long-standing way to evade
 inline inspection.
 
+### QUIC
+
+Roughly a third of web traffic is HTTP/3, and to a TCP-only sensor all of it is opaque
+UDP. tracehound decrypts QUIC Initial packets and fingerprints the handshake inside them.
+
+That sounds like an attack and is not one. QUIC protects Initial packets with keys
+derived from the Destination Connection ID, which travels in the clear precisely so that
+load balancers and observers can do this. Recovering the ClientHello is a key schedule
+and an AEAD open:
+
+```
+initial_secret        = HKDF-Extract(initial_salt, destination_connection_id)
+client_initial_secret = HKDF-Expand-Label(initial_secret, "client in", "", 32)
+key, iv, hp           = HKDF-Expand-Label(client_initial_secret, "quic key" / "quic iv" / "quic hp")
+```
+
+Strip the header protection with an AES block over a ciphertext sample, open the payload
+with AES-128-GCM, pull the CRYPTO frames out, and the handshake is the same ClientHello
+the TCP path already parses. The key schedule is checked against the worked example in
+RFC 9001 Appendix A, so the test fails if the implementation is wrong rather than
+agreeing with itself.
+
+The same client over both transports produces the same fingerprint apart from JA4's
+leading character, `t` for TCP and `q` for QUIC, and there is a test asserting exactly
+that. QUIC hellos are reassembled across datagrams and in any order, because UDP
+guarantees neither and a post-quantum hello does not fit in one Initial.
+
+See [`internal/quic`](internal/quic).
+
 ---
 
 ## How it works
@@ -269,7 +298,8 @@ The second test is the one that does the work. Any detector can be made to fire 
 lowering a threshold; staying quiet about the ordinary traffic sitting beside the attack
 is the difficult half.
 
-Coverage: `flow` 97%, `fingerprint` 91%, `pipeline` 83%, `detect` 83%, `rules` 82%.
+Coverage: `flow` 97%, `fingerprint` 91%, `pipeline` 87%, `detect` 83%, `rules` 82%,
+`quic` 82%.
 
 CI also runs the race detector, a 90 second fuzz of the TLS parser on every pull
 request, cross-compilation for five platforms, and an end-to-end demo that fails the
@@ -325,6 +355,10 @@ reproducible.
 TCP stream reassembly stops after the ClientHello. That is enough to fingerprint a
 client but not to analyse the payload of a protocol.
 
+QUIC support covers version 1 client Initials only. Draft versions and QUIC v2 use
+different initial salts, so they are rejected rather than decrypted with the wrong keys,
+and everything after the handshake is protected by keys an observer never sees.
+
 IP fragments are not reassembled. IPv6 extension header chains are walked, so a first
 fragment decodes normally, but a non-initial fragment carries no transport header and is
 counted as undecodable.
@@ -345,8 +379,8 @@ your own traffic looks like.
 ## Roadmap
 
 - SQLite persistence so findings survive a restart
-- QUIC support. JA4 already encodes the transport, but the decoder does not read QUIC yet
 - JA4S and JA4H, the server and HTTP variants
+- QUIC v2 and the draft versions, which need only their own initial salts
 
 ## License
 

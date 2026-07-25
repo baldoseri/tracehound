@@ -113,7 +113,18 @@ func ParseClientHello(buf []byte) (*ClientHello, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseHandshake(body)
+}
 
+// ParseHandshake decodes a bare TLS handshake message, with no record layer
+// wrapped around it.
+//
+// QUIC needs this. It carries the TLS handshake in CRYPTO frames rather than
+// TLS records, so by the time the frames are reassembled there is no 0x16
+// record header to strip: the bytes begin directly at the ClientHello. Both
+// entry points share everything below, which is what keeps a QUIC fingerprint
+// and a TCP fingerprint of the same client comparable.
+func ParseHandshake(body []byte) (*ClientHello, error) {
 	hs := &cursor{b: body}
 	if hs.u8() != handshakeClientHello {
 		return nil, ErrNotClientHello

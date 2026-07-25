@@ -26,6 +26,8 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcapgo"
+
+	"github.com/baldoseri/tracehound/internal/quic"
 )
 
 // Snaplen is the capture length recorded in the file header. Bulk-transfer
@@ -95,6 +97,7 @@ func Write(w io.Writer, start time.Time) (Summary, error) {
 	// flow expiry and detector scoring, so an unsorted file silently starves
 	// whole detectors of their scoring cycle.
 	g.benignBrowsing()
+	g.quicBrowsing()
 	g.c2Beacon()
 	g.dnsTunnel()
 	g.portScan()
@@ -176,6 +179,50 @@ func (g *gen) benignBrowsing() {
 		gap := time.Duration(500+g.rnd.intn(25_000)) * time.Millisecond
 		at = at.Add(gap)
 	}
+}
+
+// quicBrowsing lays down HTTP/3 traffic, which is now a large share of real
+// web browsing and which a TCP-only sensor cannot see into at all.
+//
+// The Initial packets are genuine: built with the same code path the parser
+// reverses, padded to 1200 bytes as RFC 9000 requires, and carrying a real
+// ClientHello in a CRYPTO frame. A sensor that only pretended to handle QUIC
+// would pass a demo built from imitations.
+func (g *gen) quicBrowsing() {
+	at := g.start.Add(3 * time.Minute)
+
+	for round := 0; round < 26 && g.err == nil; round++ {
+		// The first three workstations run a browser that prefers HTTP/3, so
+		// this fingerprint is shared rather than rare.
+		host := benign[g.rnd.intn(3)]
+		server := webServers[g.rnd.intn(len(webServers))]
+		sport := uint16(50000 + g.rnd.intn(10000))
+
+		dcid := g.randomBytes(8)
+		scid := g.randomBytes(4)
+
+		initial, err := quic.BuildClientInitial(dcid, scid, 0, h3Handshake("www.example.com"), 1250)
+		if err != nil {
+			g.err = fmt.Errorf("pcapgen: build QUIC Initial: %w", err)
+			return
+		}
+		g.udp(at, host, sport, server, 443, initial)
+
+		// The server's reply is encrypted under keys we never see, so it is
+		// opaque padding as far as this capture is concerned.
+		g.udp(at.Add(18*time.Millisecond), server, 443, host, sport, make([]byte, 1200))
+
+		at = at.Add(time.Duration(2000+g.rnd.intn(18_000)) * time.Millisecond)
+	}
+}
+
+// randomBytes returns n deterministic bytes for connection IDs.
+func (g *gen) randomBytes(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(g.rnd.intn(256))
+	}
+	return b
 }
 
 // c2Beacon plants a textbook implant check-in: same destination, ~60s period,
