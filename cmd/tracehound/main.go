@@ -688,7 +688,13 @@ func printSummary(s pipeline.Stats, counts map[model.Severity]int, total int) {
 			s.LastPacket.Sub(s.FirstPacket).Round(time.Second))
 	}
 	fmt.Fprintf(os.Stderr, "flows      %d seen, %d active at end\n", s.Flow.Created, s.Flow.Active)
-	fmt.Fprintf(os.Stderr, "tls        %d clients fingerprinted\n", s.Fingerprints)
+	// Servers are reported alongside clients, and the gap between the two is
+	// worth seeing rather than hiding: a QUIC flow yields a JA4 but never a
+	// JA4S, because the server's reply is encrypted under keys a passive
+	// observer never holds. A run where the two numbers are far apart is
+	// mostly QUIC, which is a fact about the network, not a fault.
+	fmt.Fprintf(os.Stderr, "tls        %d clients, %d servers fingerprinted\n",
+		s.Fingerprints, s.ServerFingerprints)
 	fmt.Fprintf(os.Stderr, "throughput %.0f packets/sec (%s wall)\n", s.PacketsPerSecond(), s.Elapsed.Round(time.Millisecond))
 
 	order := []model.Severity{model.SevCritical, model.SevHigh, model.SevMedium, model.SevLow, model.SevInfo}
