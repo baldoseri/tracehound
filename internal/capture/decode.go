@@ -34,6 +34,21 @@ type decoder struct {
 	icmp4 layers.ICMPv4
 	icmp6 layers.ICMPv6
 
+	// ip6ext walks IPv6 extension header chains. Without it the parser stops at
+	// the IPv6 header whenever an extension follows, and the packet is counted
+	// as undecodable — silently blinding the sensor to fragmented IPv6 and to
+	// anything carrying a hop-by-hop or destination option.
+	//
+	// The concrete extension types (IPv6HopByHop, IPv6Fragment, ...) cannot be
+	// used here: they implement DecodeFromBytes but not CanDecode, so they do
+	// not satisfy gopacket.DecodingLayer. The skipper exists for this case and
+	// chains straight through to the transport layer.
+	//
+	// Note it only skips: a non-initial fragment (offset > 0) carries no
+	// transport header, so what follows is payload rather than TCP. Reassembling
+	// IP fragments is out of scope, and such packets fall out as undecodable.
+	ip6ext layers.IPv6ExtensionSkipper
+
 	parser  *gopacket.DecodingLayerParser
 	decoded []gopacket.LayerType
 }
@@ -46,6 +61,7 @@ func newDecoder(link layers.LinkType) *decoder {
 	d.parser = gopacket.NewDecodingLayerParser(first,
 		&d.eth, &d.dot1q, &d.sll,
 		&d.ip4, &d.ip6,
+		&d.ip6ext,
 		&d.tcp, &d.udp, &d.icmp4, &d.icmp6,
 	)
 	// A capture is a hostile input: it contains protocols we have never heard

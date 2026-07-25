@@ -39,6 +39,16 @@ dashboard: build $(DEMO)
 $(DEMO): build
 	./bin/$(BINARY) gen-demo $(DEMO)
 
+## demo-gif: re-render the README animation from live output
+##
+## The GIF is generated rather than screen-recorded so it cannot drift out of
+## date: this re-runs the sensor and redraws whatever it actually printed.
+demo-gif: build $(DEMO)
+	cd tools/gifgen && go run . \
+		-bin ../../bin/$(BINARY) \
+		-pcap ../../$(DEMO) \
+		-o ../../docs/demo.gif
+
 ## test: run the full suite
 test:
 	$(GO) test ./... -count=1
@@ -87,4 +97,4 @@ docker:
 clean:
 	rm -rf bin coverage.out $(DEMO)
 
-.PHONY: help build demo dashboard test race cover bench fuzz vet check cross docker clean
+.PHONY: help build demo demo-gif dashboard test race cover bench fuzz vet check cross docker clean

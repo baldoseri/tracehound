@@ -8,6 +8,10 @@
 /tracehound
 /tracehound.exe
 
+# Helper tools compile next to their own source, so they need their own rules.
+/tools/gifgen/gifgen
+/tools/gifgen/gifgen.exe
+
 # Go
 *.test
 *.out

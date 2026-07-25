@@ -99,32 +99,79 @@ func readName(b []byte, off int) (labels []string, next int, ok bool) {
 	return nil, 0, false // ran off the end without a terminator
 }
 
-// registeredDomain returns the last two labels of a name, which is the level at
-// which tunnelling is scored: an attacker controls one domain and varies the
-// subdomains beneath it, so grouping by anything more specific would split one
-// tunnel into thousands of unrelated observations.
+// twoLabelSuffixes are public suffixes that are themselves two labels long.
 //
-// This is a deliberate approximation. A public-suffix list would place
-// "example.co.uk" correctly where this returns "co.uk"; the tradeoff is a
-// megabyte of embedded data and a periodic update obligation, for a detector
-// whose scoring is dominated by subdomain entropy either way.
-func registeredDomain(labels []string) string {
-	switch len(labels) {
-	case 0:
-		return ""
-	case 1:
-		return labels[0]
-	default:
-		return labels[len(labels)-2] + "." + labels[len(labels)-1]
-	}
+// This is not the full Public Suffix List. That file is roughly a megabyte,
+// changes continuously, and would impose an update obligation on a detector
+// whose scoring is dominated by subdomain entropy regardless. What it buys is
+// grouping "a.example.co.uk" under "example.co.uk" rather than "co.uk", and the
+// handful of suffixes below covers the overwhelming majority of real traffic.
+//
+// Getting this wrong in the naive direction is not merely cosmetic: collapsing
+// every British site onto "co.uk" merges unrelated domains into one bucket,
+// which both dilutes a real tunnel's signal and manufactures apparent
+// high-entropy diversity under a suffix nobody controls.
+var twoLabelSuffixes = map[string]struct{}{
+	"ac.uk": {}, "co.uk": {}, "gov.uk": {}, "ltd.uk": {}, "me.uk": {},
+	"net.uk": {}, "org.uk": {}, "plc.uk": {}, "sch.uk": {},
+	"com.au": {}, "edu.au": {}, "gov.au": {}, "id.au": {}, "net.au": {}, "org.au": {},
+	"ac.jp": {}, "co.jp": {}, "go.jp": {}, "ne.jp": {}, "or.jp": {},
+	"ac.nz": {}, "co.nz": {}, "govt.nz": {}, "net.nz": {}, "org.nz": {},
+	"co.za": {}, "gov.za": {}, "net.za": {}, "org.za": {},
+	"com.br": {}, "net.br": {}, "org.br": {}, "gov.br": {},
+	"com.cn": {}, "net.cn": {}, "org.cn": {}, "gov.cn": {}, "edu.cn": {},
+	"com.hk": {}, "com.tw": {}, "com.sg": {}, "com.my": {}, "com.vn": {},
+	"com.mx": {}, "com.ar": {}, "com.co": {}, "com.pe": {}, "com.ph": {},
+	"com.tr": {}, "com.pk": {}, "com.eg": {}, "com.sa": {}, "com.ua": {},
+	"co.in": {}, "co.kr": {}, "co.il": {}, "co.id": {}, "co.th": {}, "co.ke": {},
+	"or.kr": {}, "ne.kr": {}, "go.kr": {},
+	"gov.in": {}, "net.in": {}, "org.in": {}, "edu.in": {},
+	"eu.org": {}, "us.com": {}, "uk.com": {}, "gov.us": {},
 }
 
-// subdomainOf returns everything to the left of the registered domain.
+// registeredDomain returns the registrable portion of a name: the label a
+// registrant actually controls, plus its public suffix.
+//
+// This is the level at which tunnelling is scored. An attacker controls one
+// domain and varies the subdomains beneath it, so grouping by anything more
+// specific would split a single tunnel into thousands of unrelated
+// observations and hide it.
+func registeredDomain(labels []string) string {
+	n := len(labels)
+	switch {
+	case n == 0:
+		return ""
+	case n == 1:
+		return labels[0]
+	}
+
+	if n >= 3 {
+		if _, ok := twoLabelSuffixes[labels[n-2]+"."+labels[n-1]]; ok {
+			return labels[n-3] + "." + labels[n-2] + "." + labels[n-1]
+		}
+	}
+	return labels[n-2] + "." + labels[n-1]
+}
+
+// registeredLabels reports how many trailing labels registeredDomain consumed.
+func registeredLabels(labels []string) int {
+	n := len(labels)
+	if n >= 3 {
+		if _, ok := twoLabelSuffixes[labels[n-2]+"."+labels[n-1]]; ok {
+			return 3
+		}
+	}
+	return min(n, 2)
+}
+
+// subdomainOf returns everything to the left of the registered domain — the
+// part an attacker is free to fill with encoded payload.
 func subdomainOf(labels []string) string {
-	if len(labels) <= 2 {
+	keep := len(labels) - registeredLabels(labels)
+	if keep <= 0 {
 		return ""
 	}
-	return strings.Join(labels[:len(labels)-2], ".")
+	return strings.Join(labels[:keep], ".")
 }
 
 // isHighSignalType reports whether a query type is one commonly used to carry

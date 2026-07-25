@@ -10,7 +10,10 @@ package detect
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"hash/fnv"
 	"net/netip"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -143,9 +146,17 @@ type Engine struct {
 	all    []Detector
 
 	mu         sync.Mutex
-	lastSeen   map[string]time.Time
+	lastSeen   map[string]alertState
 	emitted    uint64
 	suppressed uint64
+}
+
+// alertState remembers what was last said about one finding, so the engine can
+// tell a genuinely new observation from a restatement of the old one.
+type alertState struct {
+	at       time.Time
+	severity model.Severity
+	digest   uint64
 }
 
 type packetEntry struct {
@@ -166,7 +177,7 @@ func NewEngine(cfg Config, out func(model.Alert)) *Engine {
 	return &Engine{
 		cfg:      cfg.withDefaults(),
 		out:      out,
-		lastSeen: make(map[string]time.Time),
+		lastSeen: make(map[string]alertState),
 	}
 }
 
@@ -230,16 +241,37 @@ func (e *Engine) Stats() Stats {
 }
 
 // emit applies suppression and forwards surviving alerts.
+//
+// Suppression is deliberately not a plain rate limit. Three cases are treated
+// differently, because they mean different things to an analyst:
+//
+//   - Identical evidence is a restatement, not a finding. A detector whose
+//     window has not moved will re-derive the same numbers on every tick;
+//     printing them again tells the reader nothing and trains them to skim.
+//     These are dropped regardless of how much time has passed.
+//   - A finding that has become more severe is news, and waiting out a cooldown
+//     to say so is exactly the wrong behaviour during an active incident.
+//   - Everything else — same finding, evolving evidence — obeys the cooldown.
 func (e *Engine) emit(a model.Alert) {
 	key := suppressionKey(&a)
+	digest := evidenceDigest(&a)
 
 	e.mu.Lock()
-	if last, ok := e.lastSeen[key]; ok && a.Time.Sub(last) < e.cfg.AlertCooldown {
-		e.suppressed++
-		e.mu.Unlock()
-		return
+	if prev, ok := e.lastSeen[key]; ok {
+		switch {
+		case prev.digest == digest:
+			e.suppressed++
+			e.mu.Unlock()
+			return
+		case a.Severity > prev.severity:
+			// Escalation: fall through and report immediately.
+		case a.Time.Sub(prev.at) < e.cfg.AlertCooldown:
+			e.suppressed++
+			e.mu.Unlock()
+			return
+		}
 	}
-	e.lastSeen[key] = a.Time
+	e.lastSeen[key] = alertState{at: a.Time, severity: a.Severity, digest: digest}
 	e.emitted++
 	e.mu.Unlock()
 
@@ -264,6 +296,26 @@ func suppressionKey(a *model.Alert) string {
 	b = append(b, '|')
 	b = strconv.AppendUint(b, uint64(a.DstPort), 10)
 	return string(b)
+}
+
+// evidenceDigest hashes an alert's supporting measurements.
+//
+// Map iteration order is randomised in Go, so the keys are sorted before
+// hashing; without that, the "same evidence" test would be a coin flip and the
+// suppression it drives would be nondeterministic.
+func evidenceDigest(a *model.Alert) uint64 {
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%s|%s|", a.RuleID, a.Severity)
+
+	keys := make([]string, 0, len(a.Evidence))
+	for k := range a.Evidence {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(h, "%s=%v;", k, a.Evidence[k])
+	}
+	return h.Sum64()
 }
 
 // NewAlertID returns a random 128-bit identifier rendered as hex.

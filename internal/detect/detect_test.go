@@ -729,6 +729,174 @@ func TestSuppressionCollapsesRepeats(t *testing.T) {
 	}
 }
 
+// fixedDetector emits a caller-controlled alert on every tick, which lets the
+// suppression rules be tested without going through a real detector.
+type fixedDetector struct{ alert model.Alert }
+
+func (f *fixedDetector) Name() string                     { return "fixed" }
+func (f *fixedDetector) OnTick(c *Context, now time.Time) { c.Emit(f.alert) }
+
+func baseAlert() model.Alert {
+	return model.Alert{
+		RuleID:   "TEST-0001",
+		Title:    "test finding",
+		Severity: model.SevMedium,
+		Src:      inside,
+		Dst:      outside,
+		DstPort:  443,
+		Evidence: map[string]any{"queries": 90, "ratio": 1.0},
+	}
+}
+
+// TestSuppressionDropsUnchangedEvidence covers the case that motivated
+// evidence-aware suppression: a detector whose window has not moved re-derives
+// identical numbers on every tick, and printing them again says nothing.
+func TestSuppressionDropsUnchangedEvidence(t *testing.T) {
+	d := &fixedDetector{alert: baseAlert()}
+	e, col := newTestEngine(d) // 1h cooldown
+
+	// Every tick here is far beyond the cooldown, so a purely time-based rule
+	// would emit three times.
+	e.Tick(t0)
+	e.Tick(t0.Add(2 * time.Hour))
+	e.Tick(t0.Add(4 * time.Hour))
+
+	if got := len(col.all()); got != 1 {
+		t.Errorf("got %d alerts, want 1: identical evidence is a restatement no matter how much time passes", got)
+	}
+	if s := e.Stats(); s.Suppressed != 2 {
+		t.Errorf("suppressed = %d, want 2", s.Suppressed)
+	}
+}
+
+// TestSuppressionReportsEscalationImmediately checks that a finding getting
+// worse is not held back by a cooldown — during an incident that is exactly
+// the wrong moment to go quiet.
+func TestSuppressionReportsEscalationImmediately(t *testing.T) {
+	d := &fixedDetector{alert: baseAlert()}
+	e, col := newTestEngine(d)
+
+	e.Tick(t0)
+
+	d.alert.Severity = model.SevHigh
+	d.alert.Evidence = map[string]any{"queries": 400, "ratio": 1.0}
+	e.Tick(t0.Add(time.Minute)) // deep inside the cooldown
+
+	alerts := col.all()
+	if len(alerts) != 2 {
+		t.Fatalf("got %d alerts, want 2 (escalation must bypass the cooldown)", len(alerts))
+	}
+	if alerts[1].Severity != model.SevHigh {
+		t.Errorf("second alert severity = %s, want high", alerts[1].Severity)
+	}
+}
+
+// TestSuppressionHoldsEvolvingEvidenceToCooldown is the other half: evidence
+// that grows but does not worsen the verdict still waits its turn.
+func TestSuppressionHoldsEvolvingEvidenceToCooldown(t *testing.T) {
+	d := &fixedDetector{alert: baseAlert()}
+	e, col := newTestEngine(d)
+
+	e.Tick(t0)
+	d.alert.Evidence = map[string]any{"queries": 120, "ratio": 1.0} // changed, same severity
+	e.Tick(t0.Add(time.Minute))
+
+	if got := len(col.all()); got != 1 {
+		t.Errorf("got %d alerts, want 1 within the cooldown", got)
+	}
+
+	// Past the cooldown with new evidence, it may speak again.
+	d.alert.Evidence = map[string]any{"queries": 300, "ratio": 1.0}
+	e.Tick(t0.Add(2 * time.Hour))
+	if got := len(col.all()); got != 2 {
+		t.Errorf("got %d alerts, want 2 after the cooldown elapsed", got)
+	}
+}
+
+// TestEvidenceDigestIsOrderIndependent guards against a subtle failure: Go
+// randomises map iteration, so hashing evidence without sorting would make
+// suppression a coin flip.
+func TestEvidenceDigestIsOrderIndependent(t *testing.T) {
+	a := baseAlert()
+	a.Evidence = map[string]any{"alpha": 1, "beta": 2, "gamma": 3, "delta": 4, "epsilon": 5}
+	first := evidenceDigest(&a)
+	for i := 0; i < 200; i++ {
+		if got := evidenceDigest(&a); got != first {
+			t.Fatalf("digest changed between calls on iteration %d", i)
+		}
+	}
+
+	b := a
+	b.Evidence = map[string]any{"alpha": 1, "beta": 2, "gamma": 3, "delta": 4, "epsilon": 6}
+	if evidenceDigest(&b) == first {
+		t.Error("digest ignored a changed evidence value")
+	}
+}
+
+// --- public suffix handling -------------------------------------------------
+
+func TestRegisteredDomainAndSubdomain(t *testing.T) {
+	tests := []struct {
+		name   string
+		domain string
+		sub    string
+	}{
+		{"example.com", "example.com", ""},
+		{"www.example.com", "example.com", "www"},
+		{"a.b.c.example.com", "example.com", "a.b.c"},
+		{"localhost", "localhost", ""},
+		{"co.uk", "co.uk", ""},
+		// Without the suffix table these would all collapse onto "co.uk",
+		// merging every unrelated British domain into one bucket.
+		{"example.co.uk", "example.co.uk", ""},
+		{"www.example.co.uk", "example.co.uk", "www"},
+		{"payload.tunnel.example.co.uk", "example.co.uk", "payload.tunnel"},
+		{"shop.example.com.au", "example.com.au", "shop"},
+		{"a.example.co.jp", "example.co.jp", "a"},
+		// "uk.example.com" must NOT be treated as a suffix match.
+		{"uk.example.com", "example.com", "uk"},
+	}
+
+	for _, tc := range tests {
+		labels := strings.Split(tc.name, ".")
+		if got := registeredDomain(labels); got != tc.domain {
+			t.Errorf("registeredDomain(%q) = %q, want %q", tc.name, got, tc.domain)
+		}
+		if got := subdomainOf(labels); got != tc.sub {
+			t.Errorf("subdomainOf(%q) = %q, want %q", tc.name, got, tc.sub)
+		}
+	}
+}
+
+// TestDNSTunnelGroupsUnderTwoLabelSuffix proves the fix matters end to end: a
+// tunnel beneath a .co.uk domain must be scored as one domain, not scattered.
+func TestDNSTunnelGroupsUnderTwoLabelSuffix(t *testing.T) {
+	d := NewDNSTunnel(DNSTunnelConfig{})
+	e, col := newTestEngine(d)
+
+	const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+	r := lcg(11)
+	at := t0
+	for i := 0; i < 60; i++ {
+		var sb strings.Builder
+		for j := 0; j < 40; j++ {
+			sb.WriteByte(alphabet[r.intn(len(alphabet))])
+		}
+		p := dnsPacket(sb.String()+".tunnel.evil.co.uk", dnsTypeTXT, at)
+		e.Packet(&p, nil, false)
+		at = at.Add(500 * time.Millisecond)
+	}
+	e.Tick(at)
+
+	alerts := col.byRule(RuleDNSTunnel)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1", len(alerts))
+	}
+	if got := alerts[0].Evidence["domain"]; got != "evil.co.uk" {
+		t.Errorf("domain = %v, want evil.co.uk", got)
+	}
+}
+
 func TestAlertIDsAreUniqueAndPopulated(t *testing.T) {
 	e, col := newTestEngine(NewInventory(InventoryConfig{}))
 
