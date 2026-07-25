@@ -27,6 +27,7 @@ import (
 	"github.com/baldoseri/tracehound/internal/pcapgen"
 	"github.com/baldoseri/tracehound/internal/pipeline"
 	"github.com/baldoseri/tracehound/internal/rules"
+	"github.com/baldoseri/tracehound/internal/store"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=..."
@@ -42,6 +43,7 @@ COMMANDS
   sniff  -i <iface>    Capture live from an interface (Linux; needs CAP_NET_RAW)
   gen-demo <file.pcap> Write a synthetic capture containing known attacks
   rules                List the loaded detection rules
+  query -db <file.db>  Read findings back out of a database
   version              Print the version
 
 Run "tracehound <command> -h" for the flags of a command.
@@ -70,6 +72,8 @@ func main() {
 		err = genDemoCmd(os.Args[2:])
 	case "rules":
 		err = rulesCmd(os.Args[2:])
+	case "query":
+		err = queryCmd(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("tracehound %s\n", version)
 	case "help", "-h", "--help":
@@ -118,6 +122,7 @@ type commonFlags struct {
 	listen      string
 	speed       float64
 	rulesDir    string
+	dbPath      string
 }
 
 func (c *commonFlags) register(fs *flag.FlagSet) {
@@ -129,6 +134,7 @@ func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.listen, "listen", "", "serve the live dashboard and JSON API on this address (e.g. :8080)")
 	fs.Float64Var(&c.speed, "speed", 0, "replay at this multiple of real time (0 = as fast as possible)")
 	fs.StringVar(&c.rulesDir, "rules", "", "directory of YAML rules (default: the built-in pack)")
+	fs.StringVar(&c.dbPath, "db", "", "persist findings to this SQLite file so they survive a restart")
 	// Defaults to low rather than info: the inventory emits an event for every
 	// host it sees, which on a scanned subnet is hundreds of lines that bury
 	// the findings. They are still counted in the summary, and -min-severity
@@ -323,14 +329,29 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 	counts := map[model.Severity]int{}
 	total := 0
 
-	// Assigned below if -listen was given. The sink runs on the pipeline
-	// goroutine and the server is constructed before Run starts, so reading it
-	// here without synchronisation is safe.
-	var dash *api.Server
+	// Both are assigned below, before Run starts. The sink runs on the pipeline
+	// goroutine, so reading them here without synchronisation is safe.
+	var (
+		dash *api.Server
+		db   *store.Store
+	)
+
+	if cf.dbPath != "" {
+		var err error
+		if db, err = store.Open(cf.dbPath, store.Options{}); err != nil {
+			return err
+		}
+		defer db.Close()
+	}
 
 	sink := func(a model.Alert) {
 		total++
 		counts[a.Severity]++
+		if db != nil {
+			// Never blocks: a full write queue drops and counts rather than
+			// stalling packet processing behind a disk.
+			db.Enqueue(a)
+		}
 		if dash != nil {
 			dash.Publish(a)
 		}
@@ -380,6 +401,15 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 
 	if cf.listen != "" {
 		dash = api.New(p, engine, inventory, 0)
+		// Replay stored findings into the dashboard so a restarted sensor
+		// opens showing what it already knows instead of an empty page.
+		if db != nil {
+			if n, err := seedFromStore(ctx, dash, db); err != nil {
+				fmt.Fprintf(os.Stderr, "tracehound: could not load history: %v\n", err)
+			} else if n > 0 && !cf.quiet {
+				fmt.Fprintf(os.Stderr, "history:    %d earlier findings loaded from %s\n", n, cf.dbPath)
+			}
+		}
 		go func() {
 			if err := dash.ListenAndServe(ctx, cf.listen); err != nil {
 				fmt.Fprintf(os.Stderr, "tracehound: dashboard: %v\n", err)
@@ -396,8 +426,32 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 		return err
 	}
 
+	// The inventory is written once, at the end. A device's byte counters move
+	// on every packet, so persisting each change would make this the busiest
+	// table in the database for no analytical gain.
+	if db != nil {
+		saveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := db.SaveDevices(saveCtx, inventory.Devices()); err != nil {
+			fmt.Fprintf(os.Stderr, "tracehound: could not save inventory: %v\n", err)
+		}
+		cancel()
+	}
+
 	if !cf.quiet && !cf.jsonOut {
 		printSummary(stats, counts, total)
+		if db != nil {
+			// Flush before reporting, so the numbers describe what is on disk
+			// rather than what is still queued.
+			if err := db.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "tracehound: closing database: %v\n", err)
+			}
+			st := db.Stats()
+			fmt.Fprintf(os.Stderr, "stored     %d findings in %s", st.Written, cf.dbPath)
+			if st.Dropped > 0 || st.Failed > 0 {
+				fmt.Fprintf(os.Stderr, " (%d dropped, %d failed)", st.Dropped, st.Failed)
+			}
+			fmt.Fprintln(os.Stderr)
+		}
 	}
 
 	// A replay finishes in milliseconds; without this the dashboard would
@@ -408,6 +462,112 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 		<-ctx.Done()
 	}
 	return nil
+}
+
+// seedFromStore loads recent findings into the dashboard's ring buffer.
+//
+// Loaded newest-first and published in reverse, so the ring ends up in the same
+// order a live run would have produced.
+func seedFromStore(ctx context.Context, dash *api.Server, db *store.Store) (int, error) {
+	history, err := db.Alerts(ctx, store.Query{Limit: api.DefaultMaxAlerts})
+	if err != nil {
+		return 0, err
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		dash.Publish(history[i])
+	}
+	return len(history), nil
+}
+
+// queryCmd reads findings back out of a database.
+func queryCmd(args []string) error {
+	fs := flag.NewFlagSet("query", flag.ExitOnError)
+	dbPath := fs.String("db", "", "SQLite file written by -db (required)")
+	limit := fs.Int("limit", 50, "maximum findings to show")
+	minSev := fs.String("min-severity", "info", "only show alerts at or above this severity")
+	rule := fs.String("rule", "", "only show one rule, e.g. TH-0001")
+	src := fs.String("src", "", "only show findings from one source address")
+	since := fs.Duration("since", 0, "only show findings newer than this, e.g. 24h")
+	jsonOut := fs.Bool("json", false, "emit JSON lines instead of text")
+	devices := fs.Bool("devices", false, "list the stored asset inventory instead of alerts")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: tracehound query -db <file.db> [flags]\n\nflags:\n")
+		fs.PrintDefaults()
+	}
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	// Accept the database as a bare argument too, since that reads naturally.
+	if *dbPath == "" && len(pos) == 1 {
+		*dbPath = pos[0]
+	}
+	if *dbPath == "" {
+		fs.Usage()
+		return errors.New("query requires -db <file.db>")
+	}
+
+	sev, err := parseSeverity(*minSev)
+	if err != nil {
+		return err
+	}
+
+	db, err := store.Open(*dbPath, store.Options{})
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	enc := json.NewEncoder(os.Stdout)
+
+	if *devices {
+		hosts, err := db.Devices(ctx)
+		if err != nil {
+			return err
+		}
+		for _, d := range hosts {
+			if *jsonOut {
+				_ = enc.Encode(d)
+				continue
+			}
+			fmt.Printf("%-16s %-18s %6d flows  %10s sent  %s\n",
+				d.Addr, orNone(d.MAC), d.Flows, humanBytes(d.BytesSent),
+				strings.Join(d.JA4s, " "))
+		}
+		fmt.Fprintf(os.Stderr, "\n%d devices in %s\n", len(hosts), *dbPath)
+		return nil
+	}
+
+	q := store.Query{Limit: *limit, MinSeverity: sev, RuleID: *rule, Src: *src}
+	if *since > 0 {
+		q.Since = time.Now().Add(-*since)
+	}
+	alerts, err := db.Alerts(ctx, q)
+	if err != nil {
+		return err
+	}
+	for _, a := range alerts {
+		if *jsonOut {
+			_ = enc.Encode(a)
+			continue
+		}
+		printAlert(a)
+	}
+
+	total, err := db.CountAlerts(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "%d shown of %d stored in %s\n", len(alerts), total, *dbPath)
+	return nil
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // browseURL turns a listen address into something clickable in a terminal.

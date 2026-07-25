@@ -139,6 +139,33 @@ something away when you had not, so the loader refuses rather than guesses.
 
 ---
 
+## Persistence
+
+Findings survive a restart when you point the sensor at a database:
+
+```bash
+tracehound sniff -i eth0 -db findings.db -listen :8080
+tracehound query -db findings.db -min-severity high -since 24h
+tracehound query -db findings.db -devices
+```
+
+The dashboard reloads stored findings on startup, so a restarted sensor opens
+showing what it already knows rather than an empty page.
+
+Two things shape the implementation. The packet loop never waits on a disk:
+alerts go to a buffered queue and a background goroutine batches them into
+transactions, and if that queue fills, alerts are dropped and counted rather
+than allowed to back up into the capture path. Losing the record of a finding is
+bad, losing the packets that would have produced the next one is worse.
+
+The driver is `modernc.org/sqlite`, a pure-Go translation of SQLite, so
+`CGO_ENABLED=0` still produces the static binary everything else depends on.
+The cgo binding is faster and would have cost the single-binary property
+outright.
+
+Flows are deliberately not stored. A busy network produces millions a day, and
+keeping them is what a flow collector is for.
+
 ## Why JA4 is worth the effort
 
 TLS encrypts the payload, not the handshake. Which cipher suites, extensions and
@@ -299,7 +326,7 @@ lowering a threshold; staying quiet about the ordinary traffic sitting beside th
 is the difficult half.
 
 Coverage: `flow` 97%, `fingerprint` 91%, `pipeline` 87%, `detect` 83%, `rules` 82%,
-`quic` 82%.
+`quic` 82%, `store` 80%.
 
 CI also runs the race detector, a 90 second fuzz of the TLS parser on every pull
 request, cross-compilation for five platforms, and an end-to-end demo that fails the
@@ -314,6 +341,7 @@ tracehound replay <file.pcap>    Analyse a capture file
 tracehound sniff  -i <iface>     Capture live (Linux; needs CAP_NET_RAW)
 tracehound gen-demo <file.pcap>  Write a synthetic capture containing known attacks
 tracehound rules                 List the loaded detection rules
+tracehound query -db <file.db>   Read findings back out of a database
 ```
 
 Useful flags:
@@ -323,6 +351,7 @@ Useful flags:
 | `-listen :8080` | Serve the live dashboard and JSON API |
 | `-speed 120` | Replay at 120 times real time so detections appear progressively |
 | `-rules ./rules` | Load a YAML rule directory instead of the built-in pack |
+| `-db findings.db` | Persist findings to SQLite so they survive a restart |
 | `-json` | Emit alerts as JSON Lines, for piping into a SIEM |
 | `-min-severity high` | Raise the reporting floor |
 | `-home-nets 10.0.0.0/8,192.168.0.0/16` | Define which addresses count as inside |
@@ -378,9 +407,10 @@ your own traffic looks like.
 
 ## Roadmap
 
-- SQLite persistence so findings survive a restart
-- JA4S and JA4H, the server and HTTP variants
+- JA4S and JA4H, the server and HTTP variants. Pairing a client fingerprint with
+  its server's response is how you identify a C2 framework rather than an odd client
 - QUIC v2 and the draft versions, which need only their own initial salts
+- Retention and rollup for the alert store, so a long-running sensor prunes itself
 
 ## License
 
