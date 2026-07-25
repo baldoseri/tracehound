@@ -9,8 +9,8 @@ exfiltration, and shows the numbers behind every call it makes.
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 tracehound reads packets from a capture file or a live interface, assembles them into
-flows, fingerprints TLS clients with JA4 over both TCP and QUIC, and reports attacker
-behaviour mapped to MITRE ATT&CK. It builds to a single static binary with no libpcap
+flows, fingerprints TLS clients with JA4 over both TCP and QUIC, fingerprints the
+servers they reach with JA4S, and reports attacker behaviour mapped to MITRE ATT&CK. It builds to a single static binary with no libpcap
 and no cgo, and the web dashboard is compiled into the executable.
 
 ![tracehound analysing a capture](docs/demo.gif)
@@ -208,6 +208,40 @@ Hellos are reassembled, and there is a test that feeds one through a byte per se
 because splitting a handshake into minimal segments is a long-standing way to evade
 inline inspection.
 
+### The server half
+
+JA4 says what software connected. JA4S, taken from the ServerHello, says what it
+connected to, and the pair is considerably stronger than either alone: the same
+combination seen across several victims is a command-and-control framework
+rather than one unusual host. In the demo capture the implant and its server
+show up together:
+
+```
+t12d040400_93657e4f18b9_2327112d5371  +  t120300_c030_dd32164b0f22
+```
+
+A ServerHello is a much smaller message than a ClientHello, because a server
+states decisions rather than offers: one cipher suite instead of a list, one
+ALPN instead of a preference order. That makes the fingerprint narrower, but
+also harder to vary. A server has no reason to shuffle its extension order the
+way browsers now shuffle theirs, so JA4S keeps that ordering as signal where
+JA4 has to sort it away. The chosen cipher is printed rather than hashed, since
+hashing a single value only makes it harder to read.
+
+HelloRetryRequest is excluded. It is a ServerHello on the wire but not the
+server's real answer, and fingerprinting it would give every server that ever
+asks for a different key share the same hash.
+
+QUIC contributes a JA4 but never a JA4S: the server's reply is protected with
+keys derived from its own connection ID, which a passive observer does not have.
+That is a real limit rather than an unimplemented feature.
+
+One caveat on provenance. JA4 is validated here against a real ClientHello from
+`crypto/tls` and against hand-computed vectors. JA4S is implemented from the
+specification and validated against real ServerHellos from Go's TLS server, but
+it has not been cross-checked against another JA4S implementation, so treat
+agreement with other tooling as unverified.
+
 ### QUIC
 
 Roughly a third of web traffic is HTTP/3, and to a TCP-only sensor all of it is opaque
@@ -340,8 +374,8 @@ The second test is the one that does the work. Any detector can be made to fire 
 lowering a threshold; staying quiet about the ordinary traffic sitting beside the attack
 is the difficult half.
 
-Coverage: `flow` 97%, `fingerprint` 91%, `pipeline` 87%, `detect` 83%, `rules` 82%,
-`quic` 82%, `store` 80%.
+Coverage: `fingerprint` 90%, `pipeline` 86%, `detect` 83%, `rules` 82%, `flow` 82%,
+`quic` 82%, `store` 81%, `api` 79%.
 
 CI also runs the race detector, a 90 second fuzz of the TLS parser on every pull
 request, cross-compilation for five platforms, and an end-to-end demo that fails the
@@ -424,9 +458,10 @@ your own traffic looks like.
 
 ## Roadmap
 
-- JA4S and JA4H, the server and HTTP variants. Pairing a client fingerprint with
-  its server's response is how you identify a C2 framework rather than an odd client
+- JA4H, the HTTP variant
 - QUIC v2 and the draft versions, which need only their own initial salts
+- A detector for known client and server fingerprint pairs, once there is a feed
+  to check them against
 
 ## License
 

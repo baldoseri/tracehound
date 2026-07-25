@@ -195,6 +195,17 @@ func (t *Table) SetFingerprint(key model.FlowKey, ja4, ja3, sni, alpn string) {
 	}
 }
 
+// SetServerFingerprint records the JA4S of a flow's server, under the table
+// lock, for the same reason SetFingerprint takes it.
+func (t *Table) SetServerFingerprint(key model.FlowKey, ja4s string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if e, ok := t.flows[key]; ok {
+		e.flow.JA4S = ja4s
+	}
+}
+
 // Drain removes and returns every remaining flow. Used at end-of-capture so
 // that flows still open when a PCAP runs out are not silently dropped.
 func (t *Table) Drain() []model.Flow {
