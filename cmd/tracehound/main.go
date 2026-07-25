@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -30,8 +31,52 @@ import (
 	"github.com/baldoseri/tracehound/internal/store"
 )
 
-// version is overridden at build time with -ldflags "-X main.version=..."
-var version = "dev"
+// version is set for the release archives with -ldflags "-X main.version=...".
+// Every other build leaves it empty and resolveVersion recovers what it can.
+var version string
+
+// resolveVersion reports the build as precisely as the build itself allows.
+//
+//	-ldflags "-X main.version=v0.3.0"  ->  "v0.3.0"                 release archives
+//	go install ...@v0.3.0              ->  "v0.3.0"                 module version
+//	go build from a checkout           ->  "devel (6bc3fd6)"        commit, + ", modified" if dirty
+//	no build info at all               ->  "unknown"
+//
+// The middle case is the one worth the code. It is the install the README
+// recommends, ldflags never reach it, and a binary that cannot name its own
+// version wastes the first exchange of every bug report filed against it.
+func resolveVersion() string {
+	if version != "" {
+		return version
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	// "(devel)" is what the toolchain records for a build that did not come
+	// from a tagged module, so it is a placeholder rather than an answer.
+	if v := bi.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	var rev, dirty string
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = ", modified"
+			}
+		}
+	}
+	if rev == "" {
+		return "devel"
+	}
+	if len(rev) > 7 {
+		rev = rev[:7]
+	}
+	return "devel (" + rev + dirty + ")"
+}
 
 const usageText = `tracehound - passive network sensor and detection engine
 
@@ -75,7 +120,7 @@ func main() {
 	case "query":
 		err = queryCmd(os.Args[2:])
 	case "version", "-v", "--version":
-		fmt.Printf("tracehound %s\n", version)
+		fmt.Printf("tracehound %s\n", resolveVersion())
 	case "help", "-h", "--help":
 		fmt.Print(usageText)
 	default:
@@ -408,7 +453,7 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 	})
 
 	if !cf.quiet && !cf.jsonOut {
-		fmt.Fprintf(os.Stderr, "tracehound %s: %s\n", version, banner)
+		fmt.Fprintf(os.Stderr, "tracehound %s: %s\n", resolveVersion(), banner)
 		fmt.Fprintf(os.Stderr, "detectors:  %s\n", strings.Join(engine.Detectors(), ", "))
 		fmt.Fprintf(os.Stderr, "rules:      %d of %d enabled (%s)\n", pack.Enabled(), pack.Len(), pack.Origin)
 	}
