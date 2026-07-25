@@ -202,19 +202,20 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	writeJSON(w, map[string]any{
-		"packets":            st.Packets,
-		"bytes":              st.Bytes,
-		"undecodable":        st.Undecodable,
-		"fingerprints":       st.Fingerprints,
-		"flows":              st.Flow,
-		"detect":             st.Detect,
-		"first_packet":       st.FirstPacket,
-		"last_packet":        st.LastPacket,
-		"packets_per_sec":    st.PacketsPerSecond(),
-		"alerts_total":       total,
-		"alerts_by_severity": counts,
-		"uptime_seconds":     int(time.Since(s.started).Seconds()),
-		"detectors":          s.eng.Detectors(),
+		"packets":             st.Packets,
+		"bytes":               st.Bytes,
+		"undecodable":         st.Undecodable,
+		"fingerprints":        st.Fingerprints,
+		"server_fingerprints": st.ServerFingerprints,
+		"flows":               st.Flow,
+		"detect":              st.Detect,
+		"first_packet":        st.FirstPacket,
+		"last_packet":         st.LastPacket,
+		"packets_per_sec":     st.PacketsPerSecond(),
+		"alerts_total":        total,
+		"alerts_by_severity":  counts,
+		"uptime_seconds":      int(time.Since(s.started).Seconds()),
+		"detectors":           s.eng.Detectors(),
 	})
 }
 

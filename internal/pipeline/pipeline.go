@@ -65,16 +65,20 @@ func (o Options) withDefaults() Options {
 
 // Stats summarises a run.
 type Stats struct {
-	Packets      uint64        `json:"packets"`
-	Bytes        uint64        `json:"bytes"`
-	Undecodable  uint64        `json:"undecodable"`
-	Fingerprints uint64        `json:"fingerprints"`
-	Flow         flow.Stats    `json:"flows"`
-	Detect       detect.Stats  `json:"detect"`
-	Capture      capture.Stats `json:"capture"`
-	Elapsed      time.Duration `json:"-"`
-	FirstPacket  time.Time     `json:"first_packet"`
-	LastPacket   time.Time     `json:"last_packet"`
+	Packets      uint64 `json:"packets"`
+	Bytes        uint64 `json:"bytes"`
+	Undecodable  uint64 `json:"undecodable"`
+	Fingerprints uint64 `json:"fingerprints"`
+	// ServerFingerprints counts JA4S recovered from ServerHellos. Always the
+	// smaller number: a QUIC server's response is encrypted under keys an
+	// observer never sees, so only TCP flows contribute.
+	ServerFingerprints uint64        `json:"server_fingerprints"`
+	Flow               flow.Stats    `json:"flows"`
+	Detect             detect.Stats  `json:"detect"`
+	Capture            capture.Stats `json:"capture"`
+	Elapsed            time.Duration `json:"-"`
+	FirstPacket        time.Time     `json:"first_packet"`
+	LastPacket         time.Time     `json:"last_packet"`
 }
 
 // PacketsPerSecond is the processing rate achieved, for benchmarking output.
@@ -99,6 +103,7 @@ type Pipeline struct {
 	opts   Options
 	table  *flow.Table
 	reasm  *fingerprint.Reassembler
+	sreasm *fingerprint.ServerReassembler
 	qreasm *quic.Reassembler
 	engine *detect.Engine
 
@@ -107,6 +112,7 @@ type Pipeline struct {
 	nBytes        atomic.Uint64
 	nUndecodable  atomic.Uint64
 	nFingerprints atomic.Uint64
+	nServerPrints atomic.Uint64
 	firstNano     atomic.Int64
 	lastNano      atomic.Int64
 	startNano     atomic.Int64
@@ -130,6 +136,7 @@ func New(engine *detect.Engine, opts Options) *Pipeline {
 		engine: engine,
 		table:  flow.New(flow.Options{IdleTimeout: opts.FlowIdleTimeout, MaxFlows: opts.MaxFlows}),
 		reasm:  fingerprint.NewReassembler(0),
+		sreasm: fingerprint.NewServerReassembler(0),
 		qreasm: quic.NewReassembler(0),
 	}
 }
@@ -157,10 +164,13 @@ func (p *Pipeline) Stats() Stats {
 		Bytes:        p.nBytes.Load(),
 		Undecodable:  p.nUndecodable.Load(),
 		Fingerprints: p.nFingerprints.Load(),
-		Capture:      captureStats,
-		Elapsed:      elapsed,
-		Flow:         p.table.Stats(),
-		Detect:       p.engine.Stats(),
+
+		ServerFingerprints: p.nServerPrints.Load(),
+
+		Capture: captureStats,
+		Elapsed: elapsed,
+		Flow:    p.table.Stats(),
+		Detect:  p.engine.Stats(),
 	}
 	if n := p.firstNano.Load(); n != 0 {
 		s.FirstPacket = time.Unix(0, n).UTC()
@@ -264,17 +274,24 @@ func (p *Pipeline) fingerprintTLS(pkt *model.Packet, f *model.Flow) {
 	if len(pkt.Payload) == 0 {
 		return
 	}
-	// A flow is fingerprinted once; after that neither reassembler is consulted
+	key, _ := model.KeyFor(pkt)
+
+	// Which half of the conversation this is decides which handshake message
+	// could be in it: a ClientHello travels one way, a ServerHello the other.
+	if pkt.Src == f.Client && pkt.SrcPort == f.ClientPort {
+		p.fingerprintClient(key, pkt, f)
+		return
+	}
+	p.fingerprintServer(key, pkt, f)
+}
+
+// fingerprintClient recovers JA4 and JA3 from a ClientHello.
+func (p *Pipeline) fingerprintClient(key model.FlowKey, pkt *model.Packet, f *model.Flow) {
+	// A flow is fingerprinted once; after that no reassembler is consulted
 	// again, so an established connection's data packets cost one comparison.
 	if f.JA4 != "" {
 		return
 	}
-	// Only the client half of the conversation carries a ClientHello.
-	if pkt.Src != f.Client || pkt.SrcPort != f.ClientPort {
-		return
-	}
-
-	key, _ := model.KeyFor(pkt)
 
 	var res *fingerprint.Result
 	switch pkt.Proto {
@@ -295,12 +312,30 @@ func (p *Pipeline) fingerprintTLS(pkt *model.Packet, f *model.Flow) {
 	p.nFingerprints.Add(1)
 }
 
+// fingerprintServer recovers JA4S from a ServerHello.
+//
+// Only over TCP. A QUIC server's response is protected with keys derived from
+// its own connection ID, which a passive observer does not have, so the
+// ServerHello is genuinely unreadable rather than merely unimplemented.
+func (p *Pipeline) fingerprintServer(key model.FlowKey, pkt *model.Packet, f *model.Flow) {
+	if f.JA4S != "" || pkt.Proto != model.ProtoTCP {
+		return
+	}
+	res := p.sreasm.Feed(key, pkt.Payload)
+	if res == nil {
+		return
+	}
+	p.table.SetServerFingerprint(key, res.JA4S)
+	p.nServerPrints.Add(1)
+}
+
 // reap expires idle flows, handing each to the flow detectors before dropping
 // any half-finished handshake state it left behind.
 func (p *Pipeline) reap(now time.Time) {
 	for _, f := range p.table.Reap(now) {
 		p.engine.FlowClosed(&f)
 		p.reasm.Forget(f.Key)
+		p.sreasm.Forget(f.Key)
 		p.qreasm.Forget(f.Key)
 	}
 }
@@ -315,6 +350,7 @@ func (p *Pipeline) finish(src capture.Source, start time.Time) {
 	for _, f := range p.table.Drain() {
 		p.engine.FlowClosed(&f)
 		p.reasm.Forget(f.Key)
+		p.sreasm.Forget(f.Key)
 		p.qreasm.Forget(f.Key)
 	}
 	if n := p.lastNano.Load(); n != 0 {

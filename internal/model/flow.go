@@ -88,6 +88,12 @@ type Flow struct {
 	ALPN string `json:"alpn,omitempty"`
 	JA4  string `json:"ja4,omitempty"`
 	JA3  string `json:"ja3,omitempty"`
+	// JA4S fingerprints the server's response. On its own it is weaker than
+	// JA4, but the pair is considerably stronger than either: a client
+	// fingerprint says what software connected, and adding the server's says
+	// what it connected to. The same pair seen across several victims is a
+	// command-and-control framework rather than one unusual host.
+	JA4S string `json:"ja4s,omitempty"`
 }
 
 // ProtoString renders the flow's protocol for JSON and display.

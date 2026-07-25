@@ -115,7 +115,8 @@
     <div class="stat"><b id="s-packets">0</b><span>packets</span></div>
     <div class="stat"><b id="s-rate">0</b><span>pkt/sec</span></div>
     <div class="stat"><b id="s-flows">0</b><span>flows</span></div>
-    <div class="stat"><b id="s-fp">0</b><span>tls fp</span></div>
+    <div class="stat"><b id="s-fp">0</b><span>client fp</span></div>
+    <div class="stat"><b id="s-sfp">0</b><span>server fp</span></div>
     <div class="stat"><b id="s-alerts">0</b><span>alerts</span></div>
   </div>
 </header>
@@ -257,6 +258,7 @@ async function refresh() {
     $("s-rate").textContent = num(Math.round(stats.packets_per_sec));
     $("s-flows").textContent = num(stats.flows?.created);
     $("s-fp").textContent = num(stats.fingerprints);
+    $("s-sfp").textContent = num(stats.server_fingerprints);
     $("s-alerts").textContent = num(stats.alerts_total);
     $("detectors").textContent = (stats.detectors || []).join(" · ");
 

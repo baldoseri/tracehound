@@ -169,8 +169,9 @@ func (g *gen) benignBrowsing() {
 
 		g.handshake(at, host, sport, server, port, hello("www.example.com"))
 
-		// A few KB of encrypted response, then teardown.
-		g.tcpData(at.Add(80*time.Millisecond), server, port, host, sport, nil, 1400)
+		// The server answers with a real ServerHello, so the capture exercises
+		// JA4S as well as JA4, then a few KB of encrypted response.
+		g.tcpData(at.Add(80*time.Millisecond), server, port, host, sport, standardServerHello(), 0)
 		g.tcpData(at.Add(90*time.Millisecond), server, port, host, sport, nil, 1400)
 		g.tcpFlags(at.Add(200*time.Millisecond), host, sport, server, port, tcpFin|tcpAck)
 
@@ -238,7 +239,9 @@ func (g *gen) c2Beacon() {
 		// a real beacon's variable-length nonce or cookie produces.
 		size := 512 + g.rnd.intn(12)
 		g.tcpData(at.Add(60*time.Millisecond), victim, sport, c2Server, 443, nil, size)
-		g.tcpData(at.Add(120*time.Millisecond), c2Server, 443, victim, sport, nil, 220)
+		// The C2 server answers with its own distinct ServerHello, so the pair
+		// of fingerprints identifies the framework rather than just the client.
+		g.tcpData(at.Add(120*time.Millisecond), c2Server, 443, victim, sport, implantServerHello(), 0)
 		g.tcpFlags(at.Add(180*time.Millisecond), victim, sport, c2Server, 443, tcpFin|tcpAck)
 
 		// 60s ± 10%.

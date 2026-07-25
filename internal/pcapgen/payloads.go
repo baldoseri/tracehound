@@ -211,6 +211,78 @@ func buildHandshake(s helloSpec) []byte {
 	return hs.b
 }
 
+// --- TLS ServerHello --------------------------------------------------------
+
+type serverHelloSpec struct {
+	legacyVersion    uint16
+	cipher           uint16
+	alpn             string
+	supportedVersion uint16
+	extras           []uint16 // extra empty extensions, to vary the count
+}
+
+// standardServerHello is what an ordinary TLS 1.3 web server answers with.
+func standardServerHello() []byte {
+	return buildServerHello(serverHelloSpec{
+		legacyVersion:    0x0303,
+		cipher:           0x1301, // TLS_AES_128_GCM_SHA256
+		alpn:             "h2",
+		supportedVersion: 0x0304,
+		extras:           []uint16{0x0033}, // key_share
+	})
+}
+
+// implantServerHello is a TLS 1.2 server picking an older suite and offering no
+// ALPN, which is what the far end of a hand-rolled implant tends to look like.
+// Paired with the implant's own JA4 it gives the demo a client and server
+// fingerprint that belong together.
+func implantServerHello() []byte {
+	return buildServerHello(serverHelloSpec{
+		legacyVersion: 0x0303,
+		cipher:        0xc030, // ECDHE_RSA_WITH_AES_256_GCM_SHA384
+		extras:        []uint16{0x000b, 0x0017, 0xff01},
+	})
+}
+
+// buildServerHello renders a spec into a complete TLS record.
+func buildServerHello(s serverHelloSpec) []byte {
+	var body builder
+	body.u16(s.legacyVersion)
+	body.raw(make([]byte, 32)) // random; zeros keep the capture reproducible
+	body.u8(0)                 // empty legacy_session_id_echo
+	body.u16(s.cipher)
+	body.u8(0) // compression: null
+
+	body.lenPrefixed(2, func(exts *builder) {
+		if s.supportedVersion != 0 {
+			exts.u16(0x002b)
+			exts.lenPrefixed(2, func(e *builder) { e.u16(s.supportedVersion) })
+		}
+		if s.alpn != "" {
+			exts.u16(0x0010)
+			exts.lenPrefixed(2, func(e *builder) {
+				e.lenPrefixed(2, func(l *builder) {
+					l.lenPrefixed(1, func(n *builder) { n.raw([]byte(s.alpn)) })
+				})
+			})
+		}
+		for _, ext := range s.extras {
+			exts.u16(ext)
+			exts.u16(0)
+		}
+	})
+
+	var hs builder
+	hs.u8(0x02) // ServerHello
+	hs.lenPrefixed(3, func(w *builder) { w.raw(body.b) })
+
+	var rec builder
+	rec.u8(0x16)
+	rec.u16(0x0303)
+	rec.lenPrefixed(2, func(w *builder) { w.raw(hs.b) })
+	return rec.b
+}
+
 // --- DNS --------------------------------------------------------------------
 
 // dnsQuery builds a standard query for one name.

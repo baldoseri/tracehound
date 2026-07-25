@@ -182,6 +182,17 @@ func TestReplayDecodesEverything(t *testing.T) {
 	if stats.Fingerprints == 0 {
 		t.Error("no TLS clients fingerprinted, but the capture is full of ClientHellos")
 	}
+	if stats.ServerFingerprints == 0 {
+		t.Error("no TLS servers fingerprinted, but the capture contains ServerHellos")
+	}
+	// Server fingerprints must trail client ones: QUIC flows contribute a JA4
+	// but never a JA4S, because a QUIC server's reply is encrypted under keys a
+	// passive observer never sees.
+	if stats.ServerFingerprints >= stats.Fingerprints {
+		t.Errorf("server fingerprints (%d) did not trail client fingerprints (%d); "+
+			"the QUIC flows should contribute a JA4 with no JA4S",
+			stats.ServerFingerprints, stats.Fingerprints)
+	}
 	if stats.Flow.Created == 0 {
 		t.Error("no flows assembled")
 	}
@@ -194,8 +205,9 @@ func TestReplayDecodesEverything(t *testing.T) {
 	if !stats.LastPacket.After(stats.FirstPacket) {
 		t.Errorf("capture spans no time: %s .. %s", stats.FirstPacket, stats.LastPacket)
 	}
-	t.Logf("%d packets, %d flows, %d fingerprints, %.0f packets/sec",
-		stats.Packets, stats.Flow.Created, stats.Fingerprints, stats.PacketsPerSecond())
+	t.Logf("%d packets, %d flows, %d client + %d server fingerprints, %.0f packets/sec",
+		stats.Packets, stats.Flow.Created, stats.Fingerprints,
+		stats.ServerFingerprints, stats.PacketsPerSecond())
 }
 
 func BenchmarkReplayThroughput(b *testing.B) {
