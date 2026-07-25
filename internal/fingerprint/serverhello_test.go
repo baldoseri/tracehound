@@ -95,14 +95,21 @@ func TestParseServerHelloFields(t *testing.T) {
 	if got, want := sh.NegotiatedVersion(), uint16(0x0304); got != want {
 		t.Errorf("NegotiatedVersion = %#04x, want %#04x", got, want)
 	}
-	// supported_versions, ALPN and key_share survive; the GREASE entry does not.
-	if len(sh.Extensions) != 3 {
-		t.Errorf("Extensions = %v, want 3 with GREASE stripped", sh.Extensions)
+	// Unlike a ClientHello, GREASE is kept: supported_versions, ALPN, key_share
+	// and the GREASE entry all count. This is the one place the two algorithms
+	// genuinely disagree, and it is checked here because getting it wrong is
+	// invisible until a fingerprint fails to match another tool's.
+	if len(sh.Extensions) != 4 {
+		t.Errorf("Extensions = %v, want 4 with GREASE retained", sh.Extensions)
 	}
+	var sawGREASE bool
 	for _, e := range sh.Extensions {
 		if isGREASE(e) {
-			t.Errorf("GREASE extension %#04x survived parsing", e)
+			sawGREASE = true
 		}
+	}
+	if !sawGREASE {
+		t.Error("the GREASE extension was stripped; JA4S keeps it")
 	}
 }
 
@@ -131,14 +138,15 @@ func TestJA4SGolden(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	// Derived from the spec by hand rather than from the implementation:
-	//   t  = TCP
-	//   13 = supported_versions says 0x0304
-	//   03 = three non-GREASE extensions
-	//   h2 = first and last character of the chosen ALPN
+	// Derived by hand from FoxIO's reference implementation rather than from
+	// this one:
+	//   t    = TCP
+	//   13   = supported_versions says 0x0304
+	//   04   = four extensions, GREASE included
+	//   h2   = the chosen ALPN
 	//   1301 = the selected cipher suite, printed rather than hashed
-	//   then the extensions in wire order, unsorted
-	want := "t1303h2_1301_" + trunc12("002b,0010,0033")
+	//   then the extensions in wire order, unsorted, GREASE still present
+	want := "t1304h2_1301_" + trunc12("002b,0010,0033,1a1a")
 
 	if got := JA4S(sh, TransportTCP); got != want {
 		t.Errorf("JA4S mismatch\n got: %s\nwant: %s", got, want)
@@ -286,7 +294,9 @@ func TestParseRealGoServerHello(t *testing.T) {
 	}
 
 	ja4s := JA4S(sh, TransportTCP)
-	shape := regexp.MustCompile(`^t(13|12|11|10)\d{2}[a-z0-9]{2}_[0-9a-f]{4}_[0-9a-f]{12}$`)
+	// The ALPN field is one or two characters, since a one-byte ALPN is not
+	// padded out.
+	shape := regexp.MustCompile(`^t(13|12|11|10)\d{2}[a-z0-9]{1,2}_[0-9a-f]{4}_[0-9a-f]{12}$`)
 	if !shape.MatchString(ja4s) {
 		t.Errorf("JA4S %q does not match the expected shape", ja4s)
 	}
@@ -374,8 +384,15 @@ func FuzzParseServerHello(f *testing.F) {
 		if sh == nil {
 			t.Fatal("nil ServerHello with nil error")
 		}
-		if got := JA4S(sh, TransportTCP); len(got) != ja4sLen {
-			t.Fatalf("JA4S %q has length %d, want %d", got, len(got), ja4sLen)
+		// Structural rather than a fixed width, because a one-character ALPN
+		// legitimately shortens the first field.
+		got := JA4S(sh, TransportTCP)
+		parts := strings.Split(got, "_")
+		if len(parts) != 3 {
+			t.Fatalf("JA4S %q does not have three fields", got)
+		}
+		if len(parts[1]) != 4 || len(parts[2]) != 12 {
+			t.Fatalf("JA4S %q: cipher is %d and hash is %d characters", got, len(parts[1]), len(parts[2]))
 		}
 	})
 }

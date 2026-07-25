@@ -106,11 +106,15 @@ func ParseServerHandshake(body []byte) (*ServerHello, error) {
 			if !exts.ok() {
 				break
 			}
-			if isGREASE(etype) {
-				continue
-			}
+			// GREASE is kept, unlike in a ClientHello. This is the one place
+			// the two algorithms genuinely disagree: FoxIO's reference strips
+			// GREASE from JA4 and leaves it in JA4S. It is not obviously
+			// principled, but a fingerprint exists to be compared against other
+			// tools, so matching the reference beats being tidy.
 			sh.Extensions = append(sh.Extensions, etype)
-			parseServerExtension(sh, etype, data)
+			if !isGREASE(etype) {
+				parseServerExtension(sh, etype, data)
+			}
 		}
 	}
 

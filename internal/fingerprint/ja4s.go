@@ -51,7 +51,8 @@ func JA4S(sh *ServerHello, transport Transport) string {
 	return string(out)
 }
 
-// ja4sLen is the exact width of a JA4S string: 7 + 1 + 4 + 1 + 12.
+// ja4sLen is a capacity hint, not a guarantee: 7 + 1 + 4 + 1 + 12 for the usual
+// two-character ALPN, one shorter when the server picks a one-byte protocol.
 const ja4sLen = 25
 
 // alpnList adapts a single chosen protocol to the slice form appendALPNCode

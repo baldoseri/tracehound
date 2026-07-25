@@ -326,8 +326,14 @@ func TestALPNCode(t *testing.T) {
 		{[]string{"h2"}, "h2"},
 		{[]string{"http/1.1"}, "h1"},
 		{[]string{"h3", "h2"}, "h3"}, // only the first ALPN counts
-		{[]string{"a"}, "aa"},        // single character is doubled
-		{[]string{"\x00\x0b"}, "0b"}, // non-alphanumeric falls back to hex
+		// Checked against FoxIO's reference implementation: a one-character
+		// value stays one character rather than being doubled, and a
+		// non-ASCII first byte becomes 99 rather than a hex rendering.
+		{[]string{"a"}, "a"},
+		{[]string{"\xc3\xa9"}, "99"},
+		{[]string{"\xff"}, "99"},
+		// Two ASCII bytes are used verbatim whatever they are.
+		{[]string{"\x00\x0b"}, "\x00\x0b"},
 	}
 	for _, tc := range tests {
 		if got := alpnCode(tc.alpn); got != tc.want {
@@ -624,10 +630,19 @@ func FuzzParseClientHello(f *testing.F) {
 		if ch == nil {
 			t.Fatal("nil ClientHello with nil error")
 		}
-		// Whatever came back must be safe to fingerprint.
+		// Whatever came back must be safe to fingerprint. The width is checked
+		// structurally rather than as a fixed number, because a
+		// one-character ALPN legitimately makes the first field one shorter.
 		ja4 := JA4(ch, TransportTCP)
-		if len(ja4) != 10+1+12+1+12 {
-			t.Fatalf("JA4 %q has wrong length %d", ja4, len(ja4))
+		parts := strings.Split(ja4, "_")
+		if len(parts) != 3 {
+			t.Fatalf("JA4 %q does not have three fields", ja4)
+		}
+		if len(parts[0]) < 9 || len(parts[0]) > 10 {
+			t.Fatalf("JA4 %q: first field is %d characters", ja4, len(parts[0]))
+		}
+		if len(parts[1]) != 12 || len(parts[2]) != 12 {
+			t.Fatalf("JA4 %q: hash fields are %d and %d characters", ja4, len(parts[1]), len(parts[2]))
 		}
 		_, _ = JA3(ch)
 	})

@@ -236,11 +236,18 @@ QUIC contributes a JA4 but never a JA4S: the server's reply is protected with
 keys derived from its own connection ID, which a passive observer does not have.
 That is a real limit rather than an unimplemented feature.
 
-One caveat on provenance. JA4 is validated here against a real ClientHello from
-`crypto/tls` and against hand-computed vectors. JA4S is implemented from the
-specification and validated against real ServerHellos from Go's TLS server, but
-it has not been cross-checked against another JA4S implementation, so treat
-agreement with other tooling as unverified.
+GREASE is the one place the two algorithms genuinely disagree: JA4 strips those
+reserved values and JA4S keeps them, in both the extension count and the hash.
+That is not obviously principled, but it is what the reference does, and a
+fingerprint exists to be compared.
+
+Both algorithms were checked line by line against FoxIO's reference Python
+implementation, which found three real defects: JA4S was stripping GREASE, a
+one-character ALPN was being doubled instead of left alone, and a non-ASCII ALPN
+was hex-encoded rather than reported as `99`. The last two affected JA4 as well.
+What has not been done is running both implementations over the same capture and
+diffing the output, so treat conformance as verified by reading rather than by
+experiment.
 
 ### QUIC
 

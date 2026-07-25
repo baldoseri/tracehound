@@ -175,29 +175,39 @@ func appendTwoDigit(dst []byte, n int) []byte {
 
 func twoDigit(n int) string { return string(appendTwoDigit(nil, n)) }
 
-// appendALPNCode writes the first and last character of the first ALPN value.
+// appendALPNCode writes the ALPN field. Shared by JA4 and JA4S, because
+// FoxIO's reference implementation encodes both identically.
 //
-// "h2" -> "h2", "http/1.1" -> "h1", none -> "00". Non-alphanumeric bytes fall
-// back to a hex rendering so that a binary ALPN value cannot inject arbitrary
-// characters into the fingerprint string.
+//	none        -> "00"
+//	"h2"        -> "h2"   (one or two bytes are used verbatim)
+//	"a"         -> "a"    (one byte stays one byte, so this field is not
+//	                       always two characters wide)
+//	"http/1.1"  -> "h1"   (longer values collapse to first and last)
+//	non-ASCII   -> "99"
+//
+// Both the single-character and the non-ASCII case were wrong here until this
+// was checked against the reference: it used to double a one-character value
+// and hex-encode anything non-alphanumeric. Neither matches, and a fingerprint
+// that disagrees with every other tool is worse than useless, since being
+// comparable is the only reason to compute one.
 func appendALPNCode(dst []byte, alpn []string) []byte {
 	if len(alpn) == 0 || len(alpn[0]) == 0 {
 		return append(dst, '0', '0')
 	}
 	v := alpn[0]
-	first, last := v[0], v[len(v)-1]
 
-	if !isAlnum(first) || !isAlnum(last) {
-		return append(dst, hexDigits[first>>4], hexDigits[last&0x0f])
+	// Tested before truncating, which is equivalent to the reference: it
+	// collapses to first-and-last and then checks that same first byte.
+	if v[0] > 0x7f {
+		return append(dst, '9', '9')
 	}
-	return append(dst, first, last)
+	if len(v) > 2 {
+		return append(dst, v[0], v[len(v)-1])
+	}
+	return append(dst, v...)
 }
 
 func alpnCode(alpn []string) string { return string(appendALPNCode(nil, alpn)) }
-
-func isAlnum(b byte) bool {
-	return (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
-}
 
 const hexDigits = "0123456789abcdef"
 
