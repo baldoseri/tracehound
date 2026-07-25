@@ -154,6 +154,18 @@ jobs:
           done
           echo "all planted behaviours detected"
 
+      # The README prints sample output and claims every finding is checkable.
+      # The capture is deterministic, so a reader can check it — and until this
+      # step existed, they would have found the samples were invented. Drift is
+      # now a build failure rather than something a reader discovers.
+      - name: README samples match the program
+        run: |
+          go run ./tools/readmegen -pcap demo.pcap
+          git diff --exit-code README.md || {
+            echo "::error::README samples are stale. Run 'make readme-samples' and commit."
+            exit 1
+          }
+
   docker:
     name: docker image
     runs-on: ubuntu-latest
