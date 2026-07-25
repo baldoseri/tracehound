@@ -49,6 +49,14 @@ demo-gif: build $(DEMO)
 		-pcap ../../$(DEMO) \
 		-o ../../docs/demo.gif
 
+## readme-samples: regenerate the README's output blocks from the program
+##
+## The samples are generated for the same reason the GIF is: a hand-written
+## sample is a claim about the program that nothing checks, and this one was
+## wrong for the entire life of the repo. CI runs this and fails on any diff.
+readme-samples: build $(DEMO)
+	$(GO) run ./tools/readmegen -bin ./bin/$(BINARY) -pcap $(DEMO)
+
 ## test: run the full suite
 test:
 	$(GO) test ./... -count=1
@@ -97,4 +105,4 @@ docker:
 clean:
 	rm -rf bin coverage.out $(DEMO)
 
-.PHONY: help build demo demo-gif dashboard test race cover bench fuzz vet check cross docker clean
+.PHONY: help build demo demo-gif dashboard readme-samples test race cover bench fuzz vet check cross docker clean
