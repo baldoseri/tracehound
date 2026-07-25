@@ -166,6 +166,21 @@ outright.
 Flows are deliberately not stored. A busy network produces millions a day, and
 keeping them is what a flow collector is for.
 
+A sensor left running would otherwise fill its disk, so retention is enforced at
+startup:
+
+```bash
+tracehound sniff -i eth0 -db findings.db -db-retention 720h -db-max-alerts 500000
+tracehound query -db findings.db -vacuum        # return freed space to the filesystem
+```
+
+Both limits are worth setting. An age cutoff expresses how far back you want to
+look, but it is not a bound: during an incident a single hour can produce more
+findings than a normal month, and only the count ceiling caps that. Deleting
+rows frees pages for reuse without shrinking the file, which is the right
+default for a database still being written to, so compaction is a separate
+command rather than something that happens on a timer.
+
 ## Why JA4 is worth the effort
 
 TLS encrypts the payload, not the handshake. Which cipher suites, extensions and
@@ -352,6 +367,8 @@ Useful flags:
 | `-speed 120` | Replay at 120 times real time so detections appear progressively |
 | `-rules ./rules` | Load a YAML rule directory instead of the built-in pack |
 | `-db findings.db` | Persist findings to SQLite so they survive a restart |
+| `-db-retention 720h` | Discard stored findings older than this |
+| `-db-max-alerts 500000` | Hard ceiling on stored findings, newest kept |
 | `-json` | Emit alerts as JSON Lines, for piping into a SIEM |
 | `-min-severity high` | Raise the reporting floor |
 | `-home-nets 10.0.0.0/8,192.168.0.0/16` | Define which addresses count as inside |
@@ -410,7 +427,6 @@ your own traffic looks like.
 - JA4S and JA4H, the server and HTTP variants. Pairing a client fingerprint with
   its server's response is how you identify a C2 framework rather than an odd client
 - QUIC v2 and the draft versions, which need only their own initial salts
-- Retention and rollup for the alert store, so a long-running sensor prunes itself
 
 ## License
 

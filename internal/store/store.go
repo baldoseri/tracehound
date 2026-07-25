@@ -408,6 +408,75 @@ func (s *Store) Devices(ctx context.Context) ([]model.Device, error) {
 	return out, rows.Err()
 }
 
+// Prune deletes alerts older than the cutoff and returns how many went.
+//
+// Without this a sensor left running fills its disk, which is a failure mode
+// that arrives quietly and then stops the sensor entirely. Alerts are the only
+// unbounded table: devices are keyed by address, so that one is bounded by the
+// size of the network.
+//
+// Deleting rows does not shrink the file. SQLite keeps the freed pages for
+// reuse, which is the right default for a database that keeps being written to.
+// Call Vacuum when the space actually needs returning to the filesystem.
+func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM alerts WHERE ts < ?`, before.UTC().UnixNano())
+	if err != nil {
+		return 0, fmt.Errorf("store: prune: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// PruneToCount keeps only the newest n alerts.
+//
+// A time-based cutoff is the usual policy, but it gives no bound during an
+// incident, when a single hour can produce more findings than a normal month.
+// This provides the hard ceiling that keeps the file from growing without limit
+// no matter what the traffic does.
+func (s *Store) PruneToCount(ctx context.Context, keep int) (int64, error) {
+	if keep < 0 {
+		return 0, fmt.Errorf("store: keep must not be negative, got %d", keep)
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM alerts
+		WHERE id NOT IN (SELECT id FROM alerts ORDER BY ts DESC LIMIT ?)`, keep)
+	if err != nil {
+		return 0, fmt.Errorf("store: prune to count: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// Vacuum rewrites the database, returning freed pages to the filesystem.
+//
+// This rewrites the whole file, so it is deliberately not automatic: doing it
+// on a schedule would make a sensor periodically stall on disk for no reason
+// the operator asked for.
+func (s *Store) Vacuum(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
+		return fmt.Errorf("store: vacuum: %w", err)
+	}
+	return nil
+}
+
+// SizeOnDisk reports the database size in bytes, including the write-ahead log.
+func (s *Store) SizeOnDisk(ctx context.Context) (int64, error) {
+	var pageCount, pageSize int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
+		return 0, err
+	}
+	if err := s.db.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
+		return 0, err
+	}
+	return pageCount * pageSize, nil
+}
+
 // CountAlerts reports how many alerts are stored.
 func (s *Store) CountAlerts(ctx context.Context) (int, error) {
 	var n int

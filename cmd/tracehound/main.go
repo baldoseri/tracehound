@@ -123,6 +123,8 @@ type commonFlags struct {
 	speed       float64
 	rulesDir    string
 	dbPath      string
+	dbRetention time.Duration
+	dbMaxAlerts int
 }
 
 func (c *commonFlags) register(fs *flag.FlagSet) {
@@ -135,6 +137,8 @@ func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.Float64Var(&c.speed, "speed", 0, "replay at this multiple of real time (0 = as fast as possible)")
 	fs.StringVar(&c.rulesDir, "rules", "", "directory of YAML rules (default: the built-in pack)")
 	fs.StringVar(&c.dbPath, "db", "", "persist findings to this SQLite file so they survive a restart")
+	fs.DurationVar(&c.dbRetention, "db-retention", 0, "discard stored findings older than this, e.g. 720h (0 = keep everything)")
+	fs.IntVar(&c.dbMaxAlerts, "db-max-alerts", 0, "hard ceiling on stored findings, newest kept (0 = no ceiling)")
 	// Defaults to low rather than info: the inventory emits an event for every
 	// host it sees, which on a scanned subnet is hundreds of lines that bury
 	// the findings. They are still counted in the summary, and -min-severity
@@ -342,6 +346,16 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 			return err
 		}
 		defer db.Close()
+
+		// Retention is enforced before the run rather than during it, so a
+		// long-lived sensor never competes with its own packet loop for the
+		// disk, and so an operator who lowers the limit sees it take effect on
+		// the next start rather than at some unpredictable later moment.
+		if n, err := applyRetention(ctx, db, cf); err != nil {
+			return err
+		} else if n > 0 && !cf.quiet {
+			fmt.Fprintf(os.Stderr, "retention:  %d older findings discarded\n", n)
+		}
 	}
 
 	sink := func(a model.Alert) {
@@ -464,6 +478,31 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 	return nil
 }
 
+// applyRetention trims the store to the configured age and count limits.
+//
+// Both are applied when both are set: an age cutoff expresses how far back an
+// analyst wants to look, while a count ceiling is what actually bounds the file
+// during an incident, when one hour can produce more findings than a normal month.
+func applyRetention(ctx context.Context, db *store.Store, cf commonFlags) (int64, error) {
+	var total int64
+
+	if cf.dbRetention > 0 {
+		n, err := db.Prune(ctx, time.Now().Add(-cf.dbRetention))
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	if cf.dbMaxAlerts > 0 {
+		n, err := db.PruneToCount(ctx, cf.dbMaxAlerts)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
 // seedFromStore loads recent findings into the dashboard's ring buffer.
 //
 // Loaded newest-first and published in reverse, so the ring ends up in the same
@@ -490,6 +529,7 @@ func queryCmd(args []string) error {
 	since := fs.Duration("since", 0, "only show findings newer than this, e.g. 24h")
 	jsonOut := fs.Bool("json", false, "emit JSON lines instead of text")
 	devices := fs.Bool("devices", false, "list the stored asset inventory instead of alerts")
+	vacuum := fs.Bool("vacuum", false, "compact the database and exit, returning freed space to the filesystem")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: tracehound query -db <file.db> [flags]\n\nflags:\n")
 		fs.PrintDefaults()
@@ -520,6 +560,22 @@ func queryCmd(args []string) error {
 
 	ctx := context.Background()
 	enc := json.NewEncoder(os.Stdout)
+
+	if *vacuum {
+		before, err := db.SizeOnDisk(ctx)
+		if err != nil {
+			return err
+		}
+		if err := db.Vacuum(ctx); err != nil {
+			return err
+		}
+		after, err := db.SizeOnDisk(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("compacted %s: %s -> %s\n", *dbPath, humanBytes(uint64(before)), humanBytes(uint64(after)))
+		return nil
+	}
 
 	if *devices {
 		hosts, err := db.Devices(ctx)
