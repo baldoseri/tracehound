@@ -234,13 +234,9 @@ func (p *Pipeline) fingerprintTLS(pkt *model.Packet, f *model.Flow) {
 		return
 	}
 
-	f.JA4, f.JA3 = res.JA4, res.JA3
-	if res.ServerName != "" {
-		f.SNI = res.ServerName
-	}
-	if res.ALPN != "" {
-		f.ALPN = res.ALPN
-	}
+	// Written through the table rather than through the pointer, because the
+	// API reads these same records concurrently. See Table.SetFingerprint.
+	p.table.SetFingerprint(key, res.JA4, res.JA3, res.ServerName, res.ALPN)
 	p.stats.Fingerprints++
 }
 

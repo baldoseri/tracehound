@@ -170,6 +170,31 @@ func (t *Table) Reap(now time.Time) []model.Flow {
 	return out
 }
 
+// SetFingerprint records TLS attributes on a flow, under the table lock.
+//
+// The pipeline holds a *model.Flow returned by Observe and is the only goroutine
+// that mutates it, but the API reads the same records concurrently through
+// Snapshot. Assigning these fields directly would be a data race on a string
+// header, which can hand a reader a pointer and a length that do not belong
+// together. It happens at most once per flow, so the extra lock acquisition
+// costs nothing measurable.
+func (t *Table) SetFingerprint(key model.FlowKey, ja4, ja3, sni, alpn string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	e, ok := t.flows[key]
+	if !ok {
+		return // reaped between fingerprinting and recording; nothing to attach to
+	}
+	e.flow.JA4, e.flow.JA3 = ja4, ja3
+	if sni != "" {
+		e.flow.SNI = sni
+	}
+	if alpn != "" {
+		e.flow.ALPN = alpn
+	}
+}
+
 // Drain removes and returns every remaining flow. Used at end-of-capture so
 // that flows still open when a PCAP runs out are not silently dropped.
 func (t *Table) Drain() []model.Flow {

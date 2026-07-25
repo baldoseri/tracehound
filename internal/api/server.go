@@ -264,11 +264,19 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	s.subs[ch] = struct{}{}
 	s.mu.Unlock()
 
+	// Unsubscribe without closing the channel.
+	//
+	// Publish copies the subscriber set under the lock and then sends outside
+	// it, so between those two moments it holds a reference to a channel this
+	// handler may already have removed. Closing here would make that send a
+	// send-on-closed-channel panic, taking the whole sensor down because a
+	// browser tab was closed at an unlucky moment. Dropping the reference is
+	// enough: the buffered channel is garbage collected, and Publish never
+	// blocks on it because its send has a default case.
 	defer func() {
 		s.mu.Lock()
 		delete(s.subs, ch)
 		s.mu.Unlock()
-		close(ch)
 	}()
 
 	h := w.Header()
