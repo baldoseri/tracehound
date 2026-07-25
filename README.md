@@ -76,8 +76,8 @@ if this file and the program disagree.
              ATT&CK: T1046
              10.0.0.99 sent SYNs to 121 distinct ports on 10.0.0.10 within 33s, of which 5 were accepted.
              Enumerating a host's listening services is reconnaissance, not normal client behaviour.
-             duration_s=33.285 open_ports=5 ports_probed=121 scan_type=vertical syn_count=180
-             target=10.0.0.10 targets_total=60
+             answered_pct=2.778 duration_s=33.285 open_ports=5 ports_probed=121 scan_type=vertical
+             syn_count=180 target=10.0.0.10 targets_total=60
 
 [HIGH    ] TH-0002  Probable DNS tunnelling to exfil.example
              2026-03-14T09:23:13Z  10.0.0.66 -> 10.0.0.1:53  score 0.96

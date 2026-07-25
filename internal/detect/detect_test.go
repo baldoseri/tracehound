@@ -427,9 +427,13 @@ func TestScanDetectsVertical(t *testing.T) {
 		e.Packet(&p, nil, false)
 		at = at.Add(20 * time.Millisecond)
 	}
-	// Two ports answered.
-	for i := 0; i < 2; i++ {
-		p := tcpPacket(outside, 22, inside, 40000, model.TCPSyn|model.TCPAck, at)
+	// Two ports answered. They have to be two different ports: open_ports
+	// counts listening services, so sending the same SYN-ACK twice is one open
+	// port observed twice, not two. The earlier version of this test sent
+	// port 22 twice and asserted 2, which is what a retransmitted SYN-ACK would
+	// have inflated.
+	for _, port := range []uint16{22, 25} {
+		p := tcpPacket(outside, port, inside, 40000, model.TCPSyn|model.TCPAck, at)
 		e.Packet(&p, nil, false)
 	}
 	e.Tick(at)
@@ -490,6 +494,110 @@ func TestScanIgnoresOrdinaryClient(t *testing.T) {
 
 	if got := col.all(); len(got) != 0 {
 		t.Errorf("ordinary client traffic produced %d scan alerts: %s", len(got), got[0].Title)
+	}
+}
+
+// TestScanIgnoresClientWithManyDestinations is the false positive the
+// cardinality thresholds cannot rule out on their own.
+//
+// One page load reaches dozens of hosts on 443, which is more distinct targets
+// than HorizontalHosts. What separates it from a sweep is that the connections
+// succeed. The previous test did not cover this: thirty connections to a single
+// host on a single port means one entry in each map, so it crossed no threshold
+// and would have passed against a detector with no thresholds at all.
+func TestScanIgnoresClientWithManyDestinations(t *testing.T) {
+	s := NewScan(ScanConfig{})
+	e, col := newTestEngine(s)
+
+	at := t0
+	for host := 1; host <= 40; host++ {
+		dst := netip.AddrFrom4([4]byte{93, 184, 216, byte(host)})
+		syn := tcpPacket(inside, uint16(40000+host), dst, 443, model.TCPSyn, at)
+		e.Packet(&syn, nil, false)
+		ack := tcpPacket(dst, 443, inside, uint16(40000+host), model.TCPSyn|model.TCPAck, at)
+		e.Packet(&ack, nil, false)
+		at = at.Add(20 * time.Millisecond)
+	}
+	e.Tick(at)
+
+	if got := col.all(); len(got) != 0 {
+		t.Errorf("a client reaching 40 hosts on 443, all answering, produced %d alerts: %s",
+			len(got), got[0].Title)
+	}
+}
+
+// TestScanWindowExpiresEvidence is the property the Window setting claims and
+// did not have. Evidence used to be dropped only after a period of total
+// silence, so a host that kept talking accumulated distinct destinations
+// forever and eventually crossed the threshold on ordinary traffic alone.
+func TestScanWindowExpiresEvidence(t *testing.T) {
+	s := NewScan(ScanConfig{Window: time.Minute})
+	e, col := newTestEngine(s)
+
+	// Nineteen ports, one short of the vertical threshold.
+	at := t0
+	for port := 1; port <= 19; port++ {
+		p := tcpPacket(inside, 40000, outside, uint16(port), model.TCPSyn, at)
+		e.Packet(&p, nil, false)
+		at = at.Add(time.Second)
+	}
+	e.Tick(at)
+	if got := col.byRule(RuleVerticalScan); len(got) != 0 {
+		t.Fatalf("19 ports crossed the threshold of 20")
+	}
+
+	// Five minutes later, well outside the window, five more. Lifetime that is
+	// 24 distinct ports; inside the window it is five, so nothing should fire.
+	at = at.Add(5 * time.Minute)
+	for port := 100; port <= 104; port++ {
+		p := tcpPacket(inside, 40000, outside, uint16(port), model.TCPSyn, at)
+		e.Packet(&p, nil, false)
+		at = at.Add(time.Second)
+	}
+	e.Tick(at)
+
+	if got := col.byRule(RuleVerticalScan); len(got) != 0 {
+		t.Errorf("expired evidence still counted towards the threshold: %s", got[0].Title)
+	}
+}
+
+// TestScanReportsAgainAfterEvidenceAgesOut covers the other half of expiry: the
+// latch that stops a finding repeating has to be released once the evidence
+// behind it is gone, or a host is reported for its first scan and never again.
+func TestScanReportsAgainAfterEvidenceAgesOut(t *testing.T) {
+	s := NewScan(ScanConfig{Window: time.Minute})
+	e, col := newTestEngine(s)
+
+	scan := func(at time.Time, firstPort, ports int) time.Time {
+		for i := 0; i < ports; i++ {
+			p := tcpPacket(inside, 40000, outside, uint16(firstPort+i), model.TCPSyn, at)
+			e.Packet(&p, nil, false)
+			at = at.Add(100 * time.Millisecond)
+		}
+		e.Tick(at)
+		return at
+	}
+
+	at := scan(t0, 1, 25)
+	if got := col.byRule(RuleVerticalScan); len(got) != 1 {
+		t.Fatalf("first scan produced %d alerts, want 1", len(got))
+	}
+
+	// Quiet long enough for every probe to leave the window, then scan again.
+	//
+	// Two things about the gap. It has to clear the engine's duplicate cooldown
+	// as well as the detector's window, or the latch can release correctly and
+	// the alert still be collapsed on its way out. And the second scan covers a
+	// different number of ports on purpose: the engine drops an alert whose
+	// evidence digest is unchanged regardless of how much time has passed, so
+	// an identical repeat would be suppressed no matter what this detector did,
+	// and the test would be measuring the engine rather than the latch.
+	at = at.Add(2 * time.Hour)
+	e.Tick(at)
+	scan(at, 200, 30)
+
+	if got := col.byRule(RuleVerticalScan); len(got) != 2 {
+		t.Errorf("second scan after the window cleared produced %d alerts in total, want 2", len(got))
 	}
 }
 
