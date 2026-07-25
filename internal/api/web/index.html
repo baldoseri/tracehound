@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tracehound</title>
+<style>
+  :root {
+    --bg:#0b0f14; --panel:#111823; --panel-2:#0e141d; --line:#1e2936;
+    --fg:#dbe4ee; --dim:#7d8ea3; --faint:#4d5c6e;
+    --accent:#4da3ff;
+    --info:#5c7a99; --low:#3fa9a0; --medium:#d99a2b; --high:#e8643c; --critical:#e0417a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+    padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel-2);
+    position:sticky; top:0; z-index:10;
+  }
+  h1 { margin:0; font-size:17px; letter-spacing:.02em; font-weight:600; }
+  h1 span { color:var(--accent); }
+  .tag {
+    font:11px/1 var(--mono); color:var(--dim); border:1px solid var(--line);
+    padding:4px 7px; border-radius:4px;
+  }
+  #live { color:var(--low); }
+  #live.down { color:var(--high); }
+
+  .stats { display:flex; gap:22px; margin-left:auto; flex-wrap:wrap; }
+  .stat { text-align:right; }
+  .stat b { display:block; font:15px/1.3 var(--mono); }
+  .stat span { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+
+  main { display:grid; grid-template-columns:minmax(0,2fr) minmax(320px,1fr); gap:16px; padding:16px 20px 40px; }
+  @media (max-width:1000px){ main { grid-template-columns:1fr; } }
+
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  section > h2 {
+    margin:0; padding:11px 14px; font-size:12px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+    border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px;
+  }
+  section > h2 .count { margin-left:auto; font:11px var(--mono); color:var(--faint); }
+  .body { max-height:min(70vh,760px); overflow:auto; }
+
+  .alert { padding:12px 14px; border-bottom:1px solid var(--line); border-left:3px solid var(--info); }
+  .alert:last-child { border-bottom:0; }
+  .alert.low{border-left-color:var(--low)} .alert.medium{border-left-color:var(--medium)}
+  .alert.high{border-left-color:var(--high)} .alert.critical{border-left-color:var(--critical)}
+  .alert.new { animation:flash 1.4s ease-out; }
+  @keyframes flash { from { background:#1b2a3d; } to { background:transparent; } }
+
+  .arow { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+  .sev {
+    font:10px/1 var(--mono); font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+    padding:4px 6px; border-radius:3px; color:#080d13;
+  }
+  .sev.info{background:var(--info)} .sev.low{background:var(--low)} .sev.medium{background:var(--medium)}
+  .sev.high{background:var(--high)} .sev.critical{background:var(--critical)}
+  .rule { font:11px var(--mono); color:var(--faint); }
+  .title { font-weight:600; }
+  .when { margin-left:auto; font:11px var(--mono); color:var(--faint); }
+  .path { font:12px var(--mono); color:var(--accent); margin:6px 0 0; }
+  .desc { color:var(--dim); margin:6px 0 0; font-size:13px; }
+  .tech { margin:8px 0 0; display:flex; gap:5px; flex-wrap:wrap; }
+  .tech a {
+    font:10px var(--mono); color:var(--dim); text-decoration:none;
+    border:1px solid var(--line); padding:3px 6px; border-radius:3px;
+  }
+  .tech a:hover { color:var(--accent); border-color:var(--accent); }
+  .ev { margin:8px 0 0; display:none; }
+  .ev.open { display:block; }
+  .ev table { width:100%; border-collapse:collapse; font:11px var(--mono); }
+  .ev td { padding:3px 8px 3px 0; vertical-align:top; }
+  .ev td:first-child { color:var(--faint); white-space:nowrap; width:1%; }
+  .toggle {
+    margin-top:7px; font:11px var(--mono); color:var(--faint);
+    background:none; border:0; padding:0; cursor:pointer;
+  }
+  .toggle:hover { color:var(--accent); }
+
+  table.grid { width:100%; border-collapse:collapse; font:12px var(--mono); }
+  table.grid th {
+    text-align:left; padding:8px 12px; font-size:10px; letter-spacing:.06em;
+    text-transform:uppercase; color:var(--faint); border-bottom:1px solid var(--line); font-weight:600;
+  }
+  table.grid td { padding:7px 12px; border-bottom:1px solid var(--panel-2); }
+  table.grid tr:hover td { background:var(--panel-2); }
+  .ja4 { color:var(--dim); font-size:11px; }
+  .ja4.rare { color:var(--medium); }
+  .num { text-align:right; }
+  .empty { padding:26px 14px; text-align:center; color:var(--faint); font-size:13px; }
+
+  .att { padding:10px 14px; }
+  .att .t { display:flex; align-items:center; gap:9px; padding:5px 0; }
+  .att .id { font:11px var(--mono); color:var(--accent); width:78px; flex:none; }
+  .att .nm { font-size:12px; color:var(--dim); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .att .n { font:11px var(--mono); color:var(--faint); }
+  .bar { height:3px; background:var(--line); border-radius:2px; overflow:hidden; margin-top:2px; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>trace<span>hound</span></h1>
+  <span class="tag" id="live">connecting…</span>
+  <span class="tag" id="detectors">—</span>
+  <div class="stats">
+    <div class="stat"><b id="s-packets">0</b><span>packets</span></div>
+    <div class="stat"><b id="s-rate">0</b><span>pkt/sec</span></div>
+    <div class="stat"><b id="s-flows">0</b><span>flows</span></div>
+    <div class="stat"><b id="s-fp">0</b><span>tls fp</span></div>
+    <div class="stat"><b id="s-alerts">0</b><span>alerts</span></div>
+  </div>
+</header>
+
+<main>
+  <section>
+    <h2>Alerts <span style="color:var(--faint);font-weight:400;text-transform:none;letter-spacing:0">low and above</span> <span class="count" id="c-alerts"></span></h2>
+    <div class="body" id="alerts"><div class="empty">waiting for detections…</div></div>
+  </section>
+
+  <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+    <section>
+      <h2>ATT&amp;CK coverage <span class="count" id="c-att"></span></h2>
+      <div class="att" id="attack"><div class="empty">no techniques observed</div></div>
+    </section>
+
+    <section>
+      <h2>Devices <span class="count" id="c-dev"></span></h2>
+      <div class="body">
+        <table class="grid">
+          <thead><tr><th>address</th><th>TLS fingerprint</th><th class="num">flows</th><th class="num">sent</th></tr></thead>
+          <tbody id="devices"><tr><td colspan="4" class="empty">no devices yet</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const SEV = ["info","low","medium","high","critical"];
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+
+function bytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  const u = ["KiB","MiB","GiB","TiB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(1) + " " + u[i];
+}
+
+const num = (n) => (Number(n) || 0).toLocaleString();
+
+function clock(ts) {
+  const d = new Date(ts);
+  return isNaN(d) ? "" : d.toISOString().slice(11, 19) + "Z";
+}
+
+// MITRE publishes sub-techniques under the parent's directory, so T1071.004
+// becomes /techniques/T1071/004.
+function attackURL(id) {
+  return "https://attack.mitre.org/techniques/" + id.replace(".", "/") + "/";
+}
+
+const seen = new Set();
+let alertCount = 0;
+
+// Informational inventory events are shown in the Devices panel, which is where
+// "what is on this network" belongs. Mixing them into the alert feed buries the
+// actual detections — on a scanned subnet there is one per host.
+const MIN_SEV = SEV.indexOf("low");
+
+function renderAlert(a, isNew) {
+  if (SEV.indexOf(a.severity) < MIN_SEV) return;
+  if (seen.has(a.id)) return;
+  seen.add(a.id);
+  alertCount++;
+
+  const box = $("alerts");
+  box.querySelector(".empty")?.remove();
+
+  const sev = esc(a.severity || "info");
+  const el = document.createElement("div");
+  el.className = "alert " + sev + (isNew ? " new" : "");
+
+  let path = esc(a.src || "");
+  if (a.dst) path += " &rarr; " + esc(a.dst) + (a.dst_port ? ":" + a.dst_port : "");
+  if (a.proto) path += "  " + esc(a.proto);
+
+  const tech = (a.techniques || [])
+    .map((t) => `<a href="${attackURL(encodeURIComponent(t.id))}" target="_blank" rel="noopener"
+                    title="${esc(t.name)}">${esc(t.id)}</a>`)
+    .join("");
+
+  const ev = Object.entries(a.evidence || {})
+    .filter(([, v]) => v !== "" && v !== null)
+    .sort(([x], [y]) => x.localeCompare(y))
+    .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`)
+    .join("");
+
+  el.innerHTML = `
+    <div class="arow">
+      <span class="sev ${sev}">${sev}</span>
+      <span class="rule">${esc(a.rule_id || "")}</span>
+      <span class="title">${esc(a.title || "")}</span>
+      <span class="when">${clock(a.time)} &middot; ${(Number(a.score) || 0).toFixed(2)}</span>
+    </div>
+    <div class="path">${path}</div>
+    ${a.description ? `<div class="desc">${esc(a.description)}</div>` : ""}
+    ${tech ? `<div class="tech">${tech}</div>` : ""}
+    ${ev ? `<button class="toggle">show evidence &#9662;</button>
+            <div class="ev"><table>${ev}</table></div>` : ""}`;
+
+  const btn = el.querySelector(".toggle");
+  if (btn) {
+    btn.addEventListener("click", () => {
+      const p = el.querySelector(".ev");
+      p.classList.toggle("open");
+      btn.innerHTML = p.classList.contains("open")
+        ? "hide evidence &#9652;" : "show evidence &#9662;";
+    });
+  }
+
+  box.prepend(el);
+  while (box.children.length > 500) box.lastChild.remove();
+  $("c-alerts").textContent = alertCount + " shown";
+}
+
+async function get(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(path + ": " + r.status);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [stats, devices, attack] = await Promise.all([
+      get("/api/stats"), get("/api/devices"), get("/api/attack"),
+    ]);
+
+    $("s-packets").textContent = num(stats.packets);
+    $("s-rate").textContent = num(Math.round(stats.packets_per_sec));
+    $("s-flows").textContent = num(stats.flows?.created);
+    $("s-fp").textContent = num(stats.fingerprints);
+    $("s-alerts").textContent = num(stats.alerts_total);
+    $("detectors").textContent = (stats.detectors || []).join(" · ");
+
+    // A fingerprint on exactly one host is what the rare-JA4 detector keys on;
+    // highlighting it here lets an analyst see the same thing by eye.
+    const users = new Map();
+    for (const d of devices) for (const j of d.ja4s || []) users.set(j, (users.get(j) || 0) + 1);
+
+    $("c-dev").textContent = devices.length + " hosts";
+    $("devices").innerHTML = devices.length
+      ? devices.map((d) => {
+          const fps = (d.ja4s || []).map((j) =>
+            `<div class="ja4 ${users.get(j) === 1 ? "rare" : ""}"
+                  title="${users.get(j)} host(s) use this stack">${esc(j)}</div>`).join("") || "—";
+          return `<tr><td>${esc(d.addr)}</td><td>${fps}</td>
+                      <td class="num">${num(d.flows)}</td>
+                      <td class="num">${bytes(d.bytes_sent)}</td></tr>`;
+        }).join("")
+      : `<tr><td colspan="4" class="empty">no devices yet</td></tr>`;
+
+    attack.sort((a, b) => b.count - a.count);
+    const top = attack.length ? attack[0].count : 1;
+    $("c-att").textContent = attack.length + " techniques";
+    $("attack").innerHTML = attack.length
+      ? attack.map((t) => `
+          <div class="t">
+            <a class="id" href="${attackURL(encodeURIComponent(t.id))}"
+               target="_blank" rel="noopener">${esc(t.id)}</a>
+            <div style="flex:1;min-width:0">
+              <div class="nm" title="${esc(t.name)}">${esc(t.name)}</div>
+              <div class="bar"><i style="width:${Math.max(4, (t.count / top) * 100)}%"></i></div>
+            </div>
+            <span class="n">${t.count}</span>
+          </div>`).join("")
+      : `<div class="empty">no techniques observed</div>`;
+  } catch (e) {
+    // Polling failures are transient during shutdown; the SSE indicator already
+    // reports connection state, so stay quiet rather than spamming the console.
+  }
+}
+
+// Backfill history, then stream. Doing it in this order means a page opened
+// mid-capture shows what already happened instead of starting blank.
+(async function start() {
+  try {
+    const history = await get("/api/alerts?limit=500&min_severity=low");
+    for (const a of history.reverse()) renderAlert(a, false);
+  } catch (e) { /* stream will populate */ }
+
+  const live = $("live");
+  const es = new EventSource("/api/stream");
+  es.addEventListener("open", () => { live.textContent = "live"; live.classList.remove("down"); });
+  es.addEventListener("error", () => { live.textContent = "reconnecting…"; live.classList.add("down"); });
+  es.addEventListener("alert", (e) => {
+    try { renderAlert(JSON.parse(e.data), true); } catch (_) {}
+  });
+
+  refresh();
+  setInterval(refresh, 2000);
+})();
+</script>
+</body>
+</html>

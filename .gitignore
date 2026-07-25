@@ -1,0 +1,52 @@
+# Build output.
+#
+# These are anchored with a leading slash on purpose. An unanchored `tracehound`
+# matches a *directory* of that name at any depth, which silently excludes
+# cmd/tracehound/ and produces a repository that will not build.
+/bin/
+/dist/
+/tracehound
+/tracehound.exe
+
+# Go
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# Fuzzing corpus is regenerated locally; crashers get committed as testdata
+# explicitly when they find something, so the cache itself stays out.
+/internal/**/testdata/fuzz/
+
+# Runtime state
+*.db
+*.db-shm
+*.db-wal
+/data/
+
+# Captures.
+#
+# The demo capture is deterministic — `make demo` regenerates it byte for byte —
+# so there is no reason to carry a megabyte of binary in git history.
+#
+# Real captures must never be committed under any circumstances: they contain
+# live traffic, which means credentials, session tokens, internal hostnames, and
+# other people's personal data.
+*.pcap
+*.pcapng
+
+# Web build artifacts
+/web/node_modules/
+/web/dist/
+/web/.next/
+
+# Local Claude Code overrides
+.claude/settings.local.json
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,37 @@
+# Two ways to run tracehound.
+#
+#   docker compose up demo     replay the bundled synthetic capture (no privileges)
+#   docker compose up sensor   capture live from the host network (needs NET_RAW)
+#
+# The demo service is the default because it needs nothing from the host and
+# produces detections immediately.
+
+services:
+  demo:
+    build:
+      context: .
+      args:
+        VERSION: compose
+    image: tracehound:latest
+    ports:
+      - "8080:8080"
+    command: ["replay", "/demo.pcap", "-listen", ":8080", "-speed", "120"]
+    restart: "no"
+
+  sensor:
+    build:
+      context: .
+    image: tracehound:latest
+    # Host networking is required to see the host's traffic at all; a bridged
+    # container only ever sees its own.
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      # NET_RAW opens the AF_PACKET socket, NET_ADMIN sets promiscuous mode.
+      # Nothing else is needed — notably not root.
+      - NET_RAW
+      - NET_ADMIN
+    command: ["sniff", "-i", "eth0", "-listen", ":8080"]
+    profiles: ["live"]
+    restart: unless-stopped

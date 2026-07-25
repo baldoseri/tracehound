@@ -1,0 +1,19 @@
+# Normalise line endings to LF in the repository regardless of the platform a
+# contributor works on. Without this, committing from Windows stores CRLF, and
+# the shell scripts inside the Makefile and Dockerfile break on Linux.
+* text=auto eol=lf
+
+# Go tooling is LF-only.
+*.go        text eol=lf
+go.mod      text eol=lf
+go.sum      text eol=lf
+
+# Anything the container or CI executes must keep LF even on a Windows checkout.
+Makefile    text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.sh        text eol=lf
+
+# Captures are binary; never let git touch their bytes.
+*.pcap      binary
+*.pcapng    binary

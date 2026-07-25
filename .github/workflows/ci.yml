@@ -1,0 +1,169 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  vet:
+    name: vet and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - run: go test ./... -count=1
+
+  race:
+    name: race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The pipeline hands flows to detectors while HTTP handlers read the same
+      # structures, so the race detector is the only thing that proves the
+      # locking is right. It needs cgo, which the normal build does not.
+      - run: CGO_ENABLED=1 go test ./... -count=1 -race
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - run: go test ./... -count=1 -coverprofile=coverage.out
+      - name: report
+        run: go tool cover -func=coverage.out | tail -n 20
+
+  fuzz:
+    name: fuzz the TLS parser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # A short run on every PR. The parser reads attacker-controlled bytes off
+      # the wire, so "it never panics" has to be continuously re-established,
+      # not asserted once.
+      - run: go test ./internal/fingerprint -run '^$' -fuzz FuzzParseClientHello -fuzztime 90s
+
+      - name: upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: internal/fingerprint/testdata/fuzz/
+
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # CGO_ENABLED=0 is the whole portability story: no libpcap, no libc, one
+      # static binary per platform from a single build host.
+      - env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags "-s -w" -o /tmp/tracehound ./cmd/tracehound
+
+  demo:
+    name: end-to-end demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Proves the shipped workflow works, not just the unit tests: generate a
+      # capture, analyse it, and require that findings came out the other end.
+      - name: generate and replay
+        run: |
+          go build -o tracehound ./cmd/tracehound
+          ./tracehound gen-demo demo.pcap
+          ./tracehound replay demo.pcap -min-severity medium | tee findings.txt
+          for rule in TH-0001 TH-0002 TH-0003 TH-0004 TH-0005 TH-0007; do
+            grep -q "$rule" findings.txt || { echo "::error::$rule did not fire"; exit 1; }
+          done
+          echo "all planted behaviours detected"
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: tracehound:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

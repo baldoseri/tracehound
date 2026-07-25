@@ -1,0 +1,11 @@
+bin/
+testdata/*.pcap
+testdata/*.pcapng
+coverage.out
+coverage.html
+.git/
+.github/
+*.md
+!README.md
+.vscode/
+.idea/
