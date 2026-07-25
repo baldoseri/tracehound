@@ -632,9 +632,10 @@ func queryCmd(args []string) error {
 				_ = enc.Encode(d)
 				continue
 			}
+			// The MAC and the fingerprints both come off the wire.
 			fmt.Printf("%-16s %-18s %6d flows  %10s sent  %s\n",
-				d.Addr, orNone(d.MAC), d.Flows, humanBytes(d.BytesSent),
-				strings.Join(d.JA4s, " "))
+				d.Addr, sanitizeTerminal(orNone(d.MAC)), d.Flows, humanBytes(d.BytesSent),
+				sanitizeTerminal(strings.Join(d.JA4s, " ")))
 		}
 		fmt.Fprintf(os.Stderr, "\n%d devices in %s\n", len(hosts), *dbPath)
 		return nil
@@ -683,8 +684,50 @@ func browseURL(addr string) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
+// sanitizeTerminal escapes control bytes so wire-controlled text cannot drive
+// the terminal it is printed to.
+//
+// Alert text carries bytes chosen by whoever sent the traffic. An SNI is copied
+// verbatim out of a ClientHello, and a JA4's ALPN field is one or two bytes
+// copied out of one, neither of which is validated. The JA4 case is deliberate
+// and must stay that way: the fingerprint's only purpose is to match other
+// tooling byte for byte, and FoxIO's reference does not filter these either. So
+// an ALPN of "\x1bc" puts ESC c, a full terminal reset, inside a fingerprint
+// that "tracehound query -devices" prints straight to a console.
+//
+// That makes the terminal the right layer to defend, and the only one that
+// needs it: the JSON encoder escapes control characters, SQLite takes the
+// bytes as parameters, and the dashboard escapes what it renders.
+//
+// The check is per byte rather than per rune on purpose. Every ASCII control
+// character is a single byte below 0x20, DEL is 0x7f, and every byte of a
+// multi-byte UTF-8 sequence is 0x80 or above, so legitimate non-ASCII text
+// passes through untouched.
+func sanitizeTerminal(s string) string {
+	dirty := false
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			dirty = true
+			break
+		}
+	}
+	if !dirty {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			fmt.Fprintf(&b, `\x%02x`, c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
 func printAlert(a model.Alert) {
-	fmt.Printf("[%-8s] %s  %s\n", strings.ToUpper(a.Severity.String()), a.RuleID, a.Title)
+	fmt.Printf("[%-8s] %s  %s\n", strings.ToUpper(a.Severity.String()), a.RuleID, sanitizeTerminal(a.Title))
 
 	where := a.Src.String()
 	if a.Dst.IsValid() {
@@ -703,7 +746,7 @@ func printAlert(a model.Alert) {
 		fmt.Printf("             ATT&CK: %s\n", strings.Join(ids, ", "))
 	}
 	if a.Description != "" {
-		fmt.Printf("             %s\n", wrap(a.Description, 92, "             "))
+		fmt.Printf("             %s\n", wrap(sanitizeTerminal(a.Description), 92, "             "))
 	}
 	if len(a.Evidence) > 0 {
 		keys := make([]string, 0, len(a.Evidence))
@@ -719,7 +762,9 @@ func printAlert(a model.Alert) {
 			}
 			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 		}
-		fmt.Printf("             %s\n", wrap(strings.Join(parts, "  "), 92, "             "))
+		// Escaped after joining rather than per value: evidence holds any, so
+		// a nested slice or map would otherwise render through %v unchecked.
+		fmt.Printf("             %s\n", wrap(sanitizeTerminal(strings.Join(parts, "  ")), 92, "             "))
 	}
 	fmt.Println()
 }

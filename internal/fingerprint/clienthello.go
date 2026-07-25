@@ -39,6 +39,13 @@ var (
 // post-quantum key shares.
 const MaxClientHello = 16384
 
+// MaxServerName bounds the SNI copied out of a hello. RFC 6066 carries a DNS
+// hostname there, and a DNS name cannot exceed 253 characters, so anything
+// longer is not a name a client could resolve. Without this the peer chooses
+// the length, up to MaxClientHello, of a string that reaches an alert title, a
+// database row and a dashboard cell.
+const MaxServerName = 253
+
 // TLS record and handshake constants.
 const (
 	recordTypeHandshake  = 0x16
@@ -239,7 +246,17 @@ func parseExtension(ch *ClientHello, etype uint16, data *cursor) {
 		for list.remaining() >= 3 && list.ok() {
 			nameType := list.u8()
 			name := list.bytes(int(list.u16()))
+			// RFC 6066 says this is a DNS hostname, and a DNS name cannot
+			// exceed 253 characters. Nothing else bounds it: the record can
+			// carry MaxClientHello bytes, so without this a peer chooses the
+			// length of a string that ends up in an alert title, a database
+			// row and a dashboard cell. Truncating rather than rejecting
+			// keeps the fingerprint, which cares only that an SNI was
+			// present, not what it said.
 			if nameType == 0 && ch.ServerName == "" {
+				if len(name) > MaxServerName {
+					name = name[:MaxServerName]
+				}
 				ch.ServerName = string(name)
 			}
 		}

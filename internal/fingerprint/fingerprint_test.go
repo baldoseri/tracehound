@@ -205,6 +205,46 @@ func TestParseClientHelloFields(t *testing.T) {
 	}
 }
 
+// TestServerNameIsBounded covers the one field a peer can make arbitrarily long.
+// The record may carry MaxClientHello bytes, so without a cap the sender chooses
+// the length of a string that reaches an alert title, a database row and a
+// dashboard cell.
+func TestServerNameIsBounded(t *testing.T) {
+	s := goldenSpec()
+	s.sni = strings.Repeat("a", 4000) + ".example"
+
+	ch, err := ParseClientHello(buildHello(s))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := len(ch.ServerName); got != MaxServerName {
+		t.Errorf("len(ServerName) = %d, want it truncated to %d", got, MaxServerName)
+	}
+	// Truncation must not cost the fingerprint anything: JA4 records only that
+	// an SNI was present, which is the "d" in the first field.
+	if !ch.HasSNI {
+		t.Error("HasSNI = false after truncation")
+	}
+	if got := JA4(ch, TransportTCP); got[3] != 'd' {
+		t.Errorf("JA4 %q does not report SNI present after truncation", got)
+	}
+}
+
+// TestServerNameOfLegalLengthIsUntouched guards the other side of the bound.
+func TestServerNameOfLegalLengthIsUntouched(t *testing.T) {
+	name := strings.Repeat("a", 60) + ".example.com"
+	s := goldenSpec()
+	s.sni = name
+
+	ch, err := ParseClientHello(buildHello(s))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if ch.ServerName != name {
+		t.Errorf("ServerName = %q, want %q", ch.ServerName, name)
+	}
+}
+
 func TestIsGREASE(t *testing.T) {
 	// The 16 reserved values from RFC 8701, all of which must be recognised.
 	for i := 0; i < 16; i++ {
