@@ -28,8 +28,16 @@ tuning:
   # Distinct ports on one target that constitute a scan.
   vertical_ports: 20
 
-  # Sliding window over which evidence accumulates.
+  # Sliding window over which evidence accumulates. A probe older than this
+  # stops counting, so a host is judged on what it did recently rather than on
+  # everything it has ever done.
   window: 5m
+
+  # The largest fraction of probes that may have been answered and still be
+  # called a scan. A browser knows the port it wants and nearly everything it
+  # opens succeeds; a scanner is asking a question and most answers are no.
+  # Without this, cardinality alone accuses any host that talks to enough peers.
+  max_answered_ratio: 0.5
 
   # Memory bounds. A scan is high-cardinality by definition, so these caps are
   # what stop the detector becoming the denial of service it exists to detect.

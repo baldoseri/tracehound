@@ -163,6 +163,7 @@ type scanTuning struct {
 	VerticalPorts     int      `yaml:"vertical_ports"`
 	HorizontalHosts   int      `yaml:"horizontal_hosts"`
 	Window            Duration `yaml:"window"`
+	MaxAnsweredRatio  float64  `yaml:"max_answered_ratio"`
 	MaxTracked        int      `yaml:"max_tracked"`
 	MaxPortsPerTarget int      `yaml:"max_ports_per_target"`
 	MaxTargetsPerPort int      `yaml:"max_targets_per_port"`
@@ -177,6 +178,7 @@ func (s *Set) scanConfig() (detect.ScanConfig, error) {
 		VerticalPorts:     t.VerticalPorts,
 		HorizontalHosts:   t.HorizontalHosts,
 		Window:            t.Window.Std(),
+		MaxAnsweredRatio:  t.MaxAnsweredRatio,
 		MaxTracked:        t.MaxTracked,
 		MaxPortsPerTarget: t.MaxPortsPerTarget,
 		MaxTargetsPerPort: t.MaxTargetsPerPort,
