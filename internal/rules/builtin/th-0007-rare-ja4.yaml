@@ -1,0 +1,45 @@
+# A TLS stack no other host on the network uses.
+
+id: TH-0007
+name: Rare TLS fingerprint
+detector: inventory
+enabled: true
+severity: medium
+
+description: >
+  One host is presenting a JA4 fingerprint nobody else presents. A fingerprint
+  is a property of the TLS stack rather than the traffic, so it survives
+  encryption and identifies the application: on a managed fleet where every
+  machine runs the same browser build, a fourth fingerprint appearing on
+  exactly one host is frequently how an implant with its own statically-linked
+  TLS library announces itself.
+
+references:
+  - https://attack.mitre.org/techniques/T1573/
+  - https://blog.foxio.io/ja4%2B-network-fingerprinting
+
+techniques:
+  - id: T1573
+    name: Encrypted Channel
+    tactic: command-and-control
+
+tuning:
+  # Hosts that must be known before "only one host uses this" means anything.
+  min_hosts_for_rarity: 5
+
+  # Distinct fingerprints needed for a baseline.
+  min_fingerprints_for_rarity: 3
+
+  # Fingerprints that must be shared by two or more hosts before any
+  # fingerprint may be called rare. Without this the detector indicts the whole
+  # network early in a capture, when every host has contributed exactly one
+  # fingerprint and so everything looks unique.
+  min_shared_fingerprints: 2
+
+  # Connections a fingerprint must appear on before its rarity counts. One
+  # connection from one host is not evidence of anything.
+  min_observations: 3
+
+exceptions:
+  - description: Build agents run tooling nothing else on the network runs
+    src: 10.0.70.0/24

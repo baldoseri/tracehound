@@ -1,0 +1,31 @@
+# First traffic from a previously unseen host.
+#
+# Informational by design. On a stable network this is worth reading; on a
+# guest or DHCP-heavy segment it is noise, and `enabled: false` turns it off
+# entirely without touching any other rule.
+
+id: TH-0006
+name: New device observed
+detector: inventory
+enabled: true
+severity: info
+
+description: >
+  A host has been seen on the monitored network for the first time. This feeds
+  the passive asset inventory, which stays useful when nothing is wrong:
+  knowing what is on the wire, and what software it speaks, is the baseline
+  every other detection is measured against.
+
+techniques: []
+
+tuning:
+  # Bound on the device table.
+  max_devices: 100000
+
+  # Set true to keep building the inventory without emitting an event per host.
+  # Disabling this rule does the same thing.
+  silence_new_device: false
+
+exceptions:
+  - description: Guest wireless range churns constantly and is not interesting
+    src: 10.0.200.0/24

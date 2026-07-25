@@ -1,0 +1,55 @@
+# Command-and-control beaconing.
+#
+# Copy this file with `tracehound rules -dump ./rules`, edit it, and run with
+# `-rules ./rules`. Every key below is optional: anything you omit falls back to
+# the compiled-in default, so a tuning file only needs the lines you changed.
+
+id: TH-0001
+name: Periodic command-and-control beaconing
+detector: beaconing
+enabled: true
+
+description: >
+  A host is opening connections to the same destination on a timer. Human
+  activity is bursty and irregular; automation is not. The detector measures the
+  dispersion of the gaps between connections and the consistency of request
+  sizes, so it survives the jitter implants add to hide exactly this pattern.
+
+references:
+  - https://attack.mitre.org/techniques/T1071/001/
+  - https://www.activecountermeasures.com/detecting-beacons-with-frequency-analysis/
+
+techniques:
+  - id: T1071.001
+    name: "Application Layer Protocol: Web Protocols"
+    tactic: command-and-control
+  - id: T1573
+    name: Encrypted Channel
+    tactic: command-and-control
+
+tuning:
+  # Connections needed before a verdict is possible. Below about 8, ordinary
+  # repeated requests produce low dispersion by chance often enough to matter.
+  min_connections: 8
+
+  # Beacon periods considered. Faster than min_interval is a chatty
+  # application; slower than max_interval and a capture rarely holds enough
+  # check-ins to judge.
+  min_interval: 2s
+  max_interval: 6h
+
+  # Score in [0,1] at which the rule fires. Lower catches sloppier beacons and
+  # costs false positives on periodic infrastructure traffic.
+  threshold: 0.75
+
+  # How far back connection times are kept.
+  history: 6h
+
+  # Bound on tracked (source, destination, port) triples.
+  max_tracked: 50000
+
+exceptions:
+  # Monitoring agents are, by design, indistinguishable from beacons. Naming
+  # them here is usually the first tuning any deployment needs.
+  - description: NTP clients poll on a fixed interval by definition
+    dst_port: 123

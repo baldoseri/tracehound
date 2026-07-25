@@ -65,6 +65,19 @@ type Config struct {
 	// it a host beaconing every 30 seconds would produce an alert on every
 	// tick forever, and the analyst would mute the tool by the end of the day.
 	AlertCooldown time.Duration
+
+	// Policy is consulted for every alert before it is emitted. Returning
+	// false drops the alert; the alert may also be modified in place.
+	//
+	// This is the seam the YAML rule pack plugs into — disabling a rule,
+	// exempting a known-good host, overriding a severity, or attaching extra
+	// ATT&CK techniques. The engine deliberately knows nothing about rule
+	// files: detection logic and deployment policy are different concerns with
+	// different rates of change, and a detector that had to parse YAML would
+	// be markedly harder to test.
+	//
+	// Nil means allow everything.
+	Policy func(*model.Alert) bool
 }
 
 // DefaultHomeNets is the RFC 1918 / link-local / loopback set, which is the
@@ -132,7 +145,11 @@ func (c *Context) Emit(a model.Alert) {
 type Stats struct {
 	Emitted    uint64 `json:"emitted"`
 	Suppressed uint64 `json:"suppressed"`
-	Detectors  int    `json:"detectors"`
+	// Filtered counts alerts dropped by rule policy: a disabled rule or a
+	// matching exception. Reported separately from Suppressed so an operator
+	// can tell "the tool is quiet" from "I told the tool to be quiet".
+	Filtered  uint64 `json:"filtered"`
+	Detectors int    `json:"detectors"`
 }
 
 // Engine dispatches events to registered detectors and publishes their alerts.
@@ -149,6 +166,7 @@ type Engine struct {
 	lastSeen   map[string]alertState
 	emitted    uint64
 	suppressed uint64
+	filtered   uint64
 }
 
 // alertState remembers what was last said about one finding, so the engine can
@@ -237,7 +255,7 @@ func (e *Engine) Tick(now time.Time) {
 func (e *Engine) Stats() Stats {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return Stats{Emitted: e.emitted, Suppressed: e.suppressed, Detectors: len(e.all)}
+	return Stats{Emitted: e.emitted, Suppressed: e.suppressed, Filtered: e.filtered, Detectors: len(e.all)}
 }
 
 // emit applies suppression and forwards surviving alerts.
@@ -253,6 +271,16 @@ func (e *Engine) Stats() Stats {
 //     to say so is exactly the wrong behaviour during an active incident.
 //   - Everything else — same finding, evolving evidence — obeys the cooldown.
 func (e *Engine) emit(a model.Alert) {
+	// Policy runs before suppression bookkeeping. An exempted alert must not
+	// leave a trace in the suppression state, or the first genuine finding
+	// after an exemption lapses would be swallowed as a duplicate.
+	if e.cfg.Policy != nil && !e.cfg.Policy(&a) {
+		e.mu.Lock()
+		e.filtered++
+		e.mu.Unlock()
+		return
+	}
+
 	key := suppressionKey(&a)
 	digest := evidenceDigest(&a)
 

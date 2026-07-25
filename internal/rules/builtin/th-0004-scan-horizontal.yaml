@@ -1,0 +1,33 @@
+# Horizontal sweep: one port, many targets.
+
+id: TH-0004
+name: Horizontal network sweep
+detector: port-scan
+enabled: true
+
+description: >
+  One host is probing the same service across many machines. This is usually
+  more urgent than a vertical scan: sweeping a single port across a subnet is
+  how an attacker finds the next machine to move to, and it often follows
+  immediately after a credential or exploit is obtained.
+
+references:
+  - https://attack.mitre.org/techniques/T1046/
+  - https://attack.mitre.org/techniques/T1018/
+
+techniques:
+  - id: T1046
+    name: Network Service Discovery
+    tactic: discovery
+  - id: T1018
+    name: Remote System Discovery
+    tactic: discovery
+
+tuning:
+  # Distinct targets on one port that constitute a sweep. Note the window and
+  # memory bounds live in TH-0003 — both rules drive the same detector.
+  horizontal_hosts: 25
+
+exceptions:
+  - description: Monitoring server health-checks every host on one port
+    src: 10.0.90.20

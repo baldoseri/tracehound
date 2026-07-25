@@ -45,7 +45,7 @@ coverage.html
 /web/dist/
 /web/.next/
 
-# Local Claude Code overrides
+# Local editor and tooling overrides
 .claude/settings.local.json
 
 # Editors and OS

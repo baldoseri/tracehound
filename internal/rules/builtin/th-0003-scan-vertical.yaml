@@ -1,0 +1,42 @@
+# Vertical port scan: many ports, one target.
+#
+# This rule and TH-0004 are two findings from one detector, so they share the
+# `port-scan` tuning block — each sets the threshold it owns and the two are
+# merged at load time.
+
+id: TH-0003
+name: Vertical port scan
+detector: port-scan
+enabled: true
+severity: high
+
+description: >
+  One host is enumerating another host's listening services. A legitimate
+  client knows which port it wants; a scanner is asking a question, and most of
+  the answers are "no". Against a single target this is reconnaissance of that
+  machine specifically.
+
+references:
+  - https://attack.mitre.org/techniques/T1046/
+
+techniques:
+  - id: T1046
+    name: Network Service Discovery
+    tactic: discovery
+
+tuning:
+  # Distinct ports on one target that constitute a scan.
+  vertical_ports: 20
+
+  # Sliding window over which evidence accumulates.
+  window: 5m
+
+  # Memory bounds. A scan is high-cardinality by definition, so these caps are
+  # what stop the detector becoming the denial of service it exists to detect.
+  max_tracked: 10000
+  max_ports_per_target: 4096
+  max_targets_per_port: 4096
+
+exceptions:
+  - description: Vulnerability scanner; its whole job is to look like this
+    src: 10.0.90.10

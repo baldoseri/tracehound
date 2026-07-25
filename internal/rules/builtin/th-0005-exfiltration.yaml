@@ -1,0 +1,32 @@
+# Large asymmetric outbound transfer.
+
+id: TH-0005
+name: Large outbound data transfer
+detector: exfiltration
+enabled: true
+
+description: >
+  A host sent far more than it received. Ordinary client traffic is
+  inbound-dominant — you download much more than you upload — so inverting that
+  shape is the signal, whether the destination is an attacker's server or an
+  unsanctioned file host. Evaluated when the flow closes, so the verdict is
+  made on the complete conversation rather than mid-transfer.
+
+references:
+  - https://attack.mitre.org/techniques/T1041/
+
+techniques:
+  - id: T1041
+    name: Exfiltration Over C2 Channel
+    tactic: exfiltration
+
+tuning:
+  # Floor below which a transfer is not worth reporting however lopsided.
+  min_bytes_out: 10485760 # 10 MiB
+
+  # How many times more data must leave than arrive.
+  min_ratio: 20
+
+exceptions:
+  - description: Offsite backup target; large one-way uploads are its purpose
+    dst: 10.0.80.0/24

@@ -26,6 +26,7 @@ import (
 	"github.com/baldoseri/tracehound/internal/model"
 	"github.com/baldoseri/tracehound/internal/pcapgen"
 	"github.com/baldoseri/tracehound/internal/pipeline"
+	"github.com/baldoseri/tracehound/internal/rules"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=..."
@@ -40,12 +41,17 @@ COMMANDS
   replay <file.pcap>   Analyse a capture file
   sniff  -i <iface>    Capture live from an interface (Linux; needs CAP_NET_RAW)
   gen-demo <file.pcap> Write a synthetic capture containing known attacks
+  rules                List the loaded detection rules
   version              Print the version
 
 Run "tracehound <command> -h" for the flags of a command.
 
 EXAMPLE
   tracehound gen-demo demo.pcap && tracehound replay demo.pcap
+
+TUNING
+  tracehound rules -dump ./rules     copy the built-in rules out for editing
+  tracehound replay x.pcap -rules ./rules
 `
 
 func main() {
@@ -62,6 +68,8 @@ func main() {
 		err = sniffCmd(os.Args[2:])
 	case "gen-demo":
 		err = genDemoCmd(os.Args[2:])
+	case "rules":
+		err = rulesCmd(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("tracehound %s\n", version)
 	case "help", "-h", "--help":
@@ -109,6 +117,7 @@ type commonFlags struct {
 	minSeverity string
 	listen      string
 	speed       float64
+	rulesDir    string
 }
 
 func (c *commonFlags) register(fs *flag.FlagSet) {
@@ -119,6 +128,7 @@ func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.DurationVar(&c.idleTimeout, "flow-timeout", 2*time.Minute, "how long a flow may be idle before it is closed")
 	fs.StringVar(&c.listen, "listen", "", "serve the live dashboard and JSON API on this address (e.g. :8080)")
 	fs.Float64Var(&c.speed, "speed", 0, "replay at this multiple of real time (0 = as fast as possible)")
+	fs.StringVar(&c.rulesDir, "rules", "", "directory of YAML rules (default: the built-in pack)")
 	// Defaults to low rather than info: the inventory emits an event for every
 	// host it sees, which on a scanned subnet is hundreds of lines that bury
 	// the findings. They are still counted in the summary, and -min-severity
@@ -229,6 +239,70 @@ func genDemoCmd(args []string) error {
 	return nil
 }
 
+// rulesCmd lists the loaded rule pack, or writes the built-in pack to disk so
+// it can be edited.
+func rulesCmd(args []string) error {
+	fs := flag.NewFlagSet("rules", flag.ExitOnError)
+	dir := fs.String("rules", "", "directory of YAML rules to load (default: built-in)")
+	dump := fs.String("dump", "", "write the built-in rules to this directory and exit")
+	verbose := fs.Bool("v", false, "include descriptions and exceptions")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: tracehound rules [-rules <dir>] [-dump <dir>] [-v]\n\nflags:\n")
+		fs.PrintDefaults()
+	}
+	if _, err := parseArgs(fs, args); err != nil {
+		return err
+	}
+
+	if *dump != "" {
+		written, err := rules.Dump(*dump)
+		if err != nil {
+			return err
+		}
+		for _, p := range written {
+			fmt.Printf("wrote %s\n", p)
+		}
+		fmt.Printf("\nedit them, then run:  tracehound replay <file.pcap> -rules %s\n", *dump)
+		return nil
+	}
+
+	pack, err := rules.Load(*dir)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("%d rules from %s, %d enabled\n\n", pack.Len(), pack.Origin, pack.Enabled())
+	for _, r := range pack.All() {
+		state := "enabled"
+		if !r.IsEnabled() {
+			state = "DISABLED"
+		}
+		sev := "detector default"
+		if r.Severity != nil {
+			sev = r.Severity.String()
+		}
+		fmt.Printf("%-9s %-34s %-13s %-16s %s\n", r.ID, r.Name, r.Detector, sev, state)
+
+		ids := make([]string, len(r.Techniques))
+		for i, t := range r.Techniques {
+			ids[i] = t.ID
+		}
+		if len(ids) > 0 {
+			fmt.Printf("          ATT&CK: %s\n", strings.Join(ids, ", "))
+		}
+		if *verbose {
+			if d := strings.TrimSpace(r.Description); d != "" {
+				fmt.Printf("          %s\n", wrap(d, 88, "          "))
+			}
+			for _, e := range r.Exceptions {
+				fmt.Printf("          except: %s\n", e.Description)
+			}
+			fmt.Println()
+		}
+	}
+	return nil
+}
+
 // run builds the engine and pipeline, consumes the source, and reports.
 func run(src capture.Source, cf commonFlags, banner string) error {
 	minSev, err := parseSeverity(cf.minSeverity)
@@ -270,15 +344,26 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 		printAlert(a)
 	}
 
-	cfg := detect.Config{HomeNets: homeNets, AlertCooldown: 10 * time.Minute}
+	pack, err := rules.Load(cf.rulesDir)
+	if err != nil {
+		return err
+	}
+	// The detectors are built from the rule pack's tuning, and the pack's
+	// policy governs which of their findings survive.
+	detectors, inventory, err := pack.Detectors()
+	if err != nil {
+		return err
+	}
+
+	cfg := detect.Config{
+		HomeNets:      homeNets,
+		AlertCooldown: 10 * time.Minute,
+		Policy:        pack.Policy(),
+	}
 	engine := detect.NewEngine(cfg, sink)
-	// The inventory is held by name because the API serves its device table.
-	inventory := detect.NewInventory(detect.InventoryConfig{})
-	engine.Register(detect.NewBeacon(detect.BeaconConfig{}))
-	engine.Register(detect.NewDNSTunnel(detect.DNSTunnelConfig{}))
-	engine.Register(detect.NewScan(detect.ScanConfig{}))
-	engine.Register(detect.NewExfil(detect.ExfilConfig{}))
-	engine.Register(inventory)
+	for _, d := range detectors {
+		engine.Register(d)
+	}
 
 	p := pipeline.New(engine, pipeline.Options{
 		FlowIdleTimeout: cf.idleTimeout,
@@ -289,7 +374,8 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 
 	if !cf.quiet && !cf.jsonOut {
 		fmt.Fprintf(os.Stderr, "tracehound %s: %s\n", version, banner)
-		fmt.Fprintf(os.Stderr, "detectors: %s\n", strings.Join(engine.Detectors(), ", "))
+		fmt.Fprintf(os.Stderr, "detectors:  %s\n", strings.Join(engine.Detectors(), ", "))
+		fmt.Fprintf(os.Stderr, "rules:      %d of %d enabled (%s)\n", pack.Enabled(), pack.Len(), pack.Origin)
 	}
 
 	if cf.listen != "" {
@@ -399,8 +485,8 @@ func printSummary(s pipeline.Stats, counts map[model.Severity]int, total int) {
 	if len(parts) == 0 {
 		parts = append(parts, "none")
 	}
-	fmt.Fprintf(os.Stderr, "alerts     %d (%s), %d suppressed as duplicates\n",
-		total, strings.Join(parts, ", "), s.Detect.Suppressed)
+	fmt.Fprintf(os.Stderr, "alerts     %d (%s), %d suppressed as duplicates, %d filtered by rules\n",
+		total, strings.Join(parts, ", "), s.Detect.Suppressed, s.Detect.Filtered)
 }
 
 func parseSeverity(s string) (model.Severity, error) {

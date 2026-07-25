@@ -1,0 +1,54 @@
+# DNS tunnelling and DNS-based exfiltration.
+
+id: TH-0002
+name: Probable DNS tunnelling
+detector: dns-tunnel
+enabled: true
+
+description: >
+  A host is encoding data into the subdomains it looks up. DNS is the ideal
+  covert channel: it leaves nearly every network, it is rarely inspected, and
+  recursive resolvers deliver an attacker's query to an attacker's server for
+  them. The signature is thousands of never-repeated, high-entropy, unusually
+  long names under one domain — a shape no legitimate resolution pattern has,
+  because a tunnel cannot reuse a name without caching swallowing the data.
+
+references:
+  - https://attack.mitre.org/techniques/T1071/004/
+  - https://attack.mitre.org/techniques/T1048/003/
+
+techniques:
+  - id: T1071.004
+    name: "Application Layer Protocol: DNS"
+    tactic: command-and-control
+  - id: T1048.003
+    name: "Exfiltration Over Alternative Protocol"
+    tactic: exfiltration
+  - id: T1572
+    name: Protocol Tunneling
+    tactic: command-and-control
+
+tuning:
+  # Queries to one registered domain before scoring begins.
+  min_queries: 30
+
+  # Weighted score in [0,1] across four axes: name uniqueness, subdomain
+  # length, Shannon entropy, and the share of TXT/NULL/CNAME lookups.
+  # Uniqueness carries the most weight because it is the one property a
+  # working tunnel cannot avoid.
+  threshold: 0.7
+
+  history: 1h
+  max_tracked: 20000
+
+  # Cap on the per-domain unique-name set. Past this, every further query is
+  # treated as unique, which is the conservative reading.
+  max_unique_names: 2000
+
+exceptions:
+  # These generate exactly the shape the detector looks for, legitimately:
+  # high-entropy, never-repeated names under one domain.
+  - description: Antivirus reputation lookups encode file hashes into subdomains
+    domain: avts.mcafee.com
+  - description: Spamhaus DNSBL encodes the queried address into the name
+    domain: zen.spamhaus.org
