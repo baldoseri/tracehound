@@ -24,11 +24,16 @@ package fingerprint
 // connected to, and a matching pair across several victims identifies a
 // command-and-control framework rather than a single odd host.
 //
-// Note on provenance: unlike JA4, which this package validates against a real
-// ClientHello produced by crypto/tls and against hand-computed vectors, JA4S
-// here is implemented from the specification without a third-party fingerprint
-// to cross-check against. The structure and the inputs are tested; agreement
-// with other JA4S implementations is not independently verified.
+// A third difference is harder to justify but has to be honoured: GREASE is
+// retained here, in both the extension count and the hash, while JA4 strips it.
+// That asymmetry is real in FoxIO's reference implementation, which routes JA4S
+// through a formatting helper and JA4 through one that filters GREASE first.
+//
+// Note on provenance: this was checked line by line against that reference
+// rather than against the prose specification, which is not public in the
+// detail needed to settle GREASE handling. The two implementations have not
+// been run over the same capture and diffed, so conformance is established by
+// reading, not by experiment.
 func JA4S(sh *ServerHello, transport Transport) string {
 	out := make([]byte, 0, ja4sLen)
 
