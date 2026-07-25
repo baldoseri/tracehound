@@ -13,6 +13,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/baldoseri/tracehound/internal/capture"
@@ -84,6 +86,15 @@ func (s Stats) PacketsPerSecond() float64 {
 }
 
 // Pipeline owns the sensor's data path.
+//
+// The packet loop runs on one goroutine, but the HTTP API reads the counters
+// while it runs. They are therefore atomics rather than plain fields: a struct
+// copied out by Stats() while the loop was incrementing it is a data race, and
+// on a 64-bit counter a torn read is a plausible outcome rather than a
+// theoretical one.
+//
+// Atomics rather than a mutex because two of these are touched per packet, and
+// a lock acquisition per packet at a million packets a second is not free.
 type Pipeline struct {
 	opts   Options
 	table  *flow.Table
@@ -91,9 +102,24 @@ type Pipeline struct {
 	qreasm *quic.Reassembler
 	engine *detect.Engine
 
-	stats     Stats
-	nextTick  time.Time
-	wallStart time.Time
+	// Hot counters, written by the packet loop and read by the API.
+	nPackets      atomic.Uint64
+	nBytes        atomic.Uint64
+	nUndecodable  atomic.Uint64
+	nFingerprints atomic.Uint64
+	firstNano     atomic.Int64
+	lastNano      atomic.Int64
+	startNano     atomic.Int64
+
+	// Cold fields, written once when the run ends.
+	mu      sync.Mutex
+	capture capture.Stats
+	elapsed time.Duration
+
+	// Touched only by the packet loop, never by a reader.
+	nextTick    time.Time
+	wallStart   time.Time
+	firstPacket time.Time
 }
 
 // New builds a pipeline. Detectors must already be registered on the engine.
@@ -111,11 +137,37 @@ func New(engine *detect.Engine, opts Options) *Pipeline {
 // Table exposes the flow table for the API layer.
 func (p *Pipeline) Table() *flow.Table { return p.table }
 
-// Stats returns a snapshot of run counters.
+// Stats returns a snapshot of run counters. Safe to call while a run is in
+// progress, which is what the dashboard does twice a second.
 func (p *Pipeline) Stats() Stats {
-	s := p.stats
-	s.Flow = p.table.Stats()
-	s.Detect = p.engine.Stats()
+	p.mu.Lock()
+	captureStats, elapsed := p.capture, p.elapsed
+	p.mu.Unlock()
+
+	// While the run is still going there is no recorded elapsed time, so
+	// measure it live rather than reporting a throughput of zero.
+	if elapsed == 0 {
+		if started := p.startNano.Load(); started != 0 {
+			elapsed = time.Since(time.Unix(0, started))
+		}
+	}
+
+	s := Stats{
+		Packets:      p.nPackets.Load(),
+		Bytes:        p.nBytes.Load(),
+		Undecodable:  p.nUndecodable.Load(),
+		Fingerprints: p.nFingerprints.Load(),
+		Capture:      captureStats,
+		Elapsed:      elapsed,
+		Flow:         p.table.Stats(),
+		Detect:       p.engine.Stats(),
+	}
+	if n := p.firstNano.Load(); n != 0 {
+		s.FirstPacket = time.Unix(0, n).UTC()
+	}
+	if n := p.lastNano.Load(); n != 0 {
+		s.LastPacket = time.Unix(0, n).UTC()
+	}
 	return s
 }
 
@@ -123,13 +175,14 @@ func (p *Pipeline) Stats() Stats {
 func (p *Pipeline) Run(ctx context.Context, src capture.Source) (Stats, error) {
 	start := time.Now()
 	p.wallStart = start
+	p.startNano.Store(start.UnixNano())
 
 	// Cancellation is checked periodically rather than per packet: a select on
 	// every packet costs more than the check is worth at line rate.
 	const cancelCheckEvery = 4096
 
 	for {
-		if p.stats.Packets%cancelCheckEvery == 0 {
+		if p.nPackets.Load()%cancelCheckEvery == 0 {
 			select {
 			case <-ctx.Done():
 				p.finish(src, start)
@@ -156,18 +209,20 @@ func (p *Pipeline) Run(ctx context.Context, src capture.Source) (Stats, error) {
 
 // handle processes one decoded packet.
 func (p *Pipeline) handle(pkt *model.Packet) {
-	p.stats.Packets++
-	p.stats.Bytes += uint64(pkt.WireLength)
-	if p.stats.FirstPacket.IsZero() {
-		p.stats.FirstPacket = pkt.Timestamp
+	p.nPackets.Add(1)
+	p.nBytes.Add(uint64(pkt.WireLength))
+
+	if p.firstPacket.IsZero() {
+		p.firstPacket = pkt.Timestamp
+		p.firstNano.Store(pkt.Timestamp.UnixNano())
 		p.nextTick = pkt.Timestamp.Add(p.opts.TickInterval)
 	}
 	// Track the maximum, not the most recent. Captures merged from several
 	// sensors, or written by a tool that batches per stream, can step backwards
 	// in time; taking the last value would then hand a stale "now" to the final
 	// scoring pass and expire evidence that had not actually aged out.
-	if pkt.Timestamp.After(p.stats.LastPacket) {
-		p.stats.LastPacket = pkt.Timestamp
+	if n := pkt.Timestamp.UnixNano(); n > p.lastNano.Load() {
+		p.lastNano.Store(n)
 	}
 
 	p.pace(pkt.Timestamp)
@@ -192,7 +247,7 @@ func (p *Pipeline) pace(ts time.Time) {
 	if p.opts.Speed <= 0 {
 		return
 	}
-	target := time.Duration(float64(ts.Sub(p.stats.FirstPacket)) / p.opts.Speed)
+	target := time.Duration(float64(ts.Sub(p.firstPacket)) / p.opts.Speed)
 	if wait := target - time.Since(p.wallStart); wait > 0 {
 		time.Sleep(wait)
 	}
@@ -237,7 +292,7 @@ func (p *Pipeline) fingerprintTLS(pkt *model.Packet, f *model.Flow) {
 	// Written through the table rather than through the pointer, because the
 	// API reads these same records concurrently. See Table.SetFingerprint.
 	p.table.SetFingerprint(key, res.JA4, res.JA3, res.ServerName, res.ALPN)
-	p.stats.Fingerprints++
+	p.nFingerprints.Add(1)
 }
 
 // reap expires idle flows, handing each to the flow detectors before dropping
@@ -262,12 +317,15 @@ func (p *Pipeline) finish(src capture.Source, start time.Time) {
 		p.reasm.Forget(f.Key)
 		p.qreasm.Forget(f.Key)
 	}
-	if !p.stats.LastPacket.IsZero() {
-		p.engine.Tick(p.stats.LastPacket)
+	if n := p.lastNano.Load(); n != 0 {
+		p.engine.Tick(time.Unix(0, n).UTC())
 	}
 
 	cs := src.Stats()
-	p.stats.Capture = cs
-	p.stats.Undecodable = cs.Undecode
-	p.stats.Elapsed = time.Since(start)
+	p.nUndecodable.Store(cs.Undecode)
+
+	p.mu.Lock()
+	p.capture = cs
+	p.elapsed = time.Since(start)
+	p.mu.Unlock()
 }
