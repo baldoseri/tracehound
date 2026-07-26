@@ -374,6 +374,22 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Hand the next signal back to the runtime as soon as the first arrives.
+	//
+	// NotifyContext keeps the signal registered until stop is called, and stop
+	// was deferred to the end of this function, so during shutdown every
+	// further Ctrl-C went into a one-deep channel nobody reads. The default
+	// handler being disabled, there was no way to abort a shutdown that was
+	// itself stuck, and the only remaining option was SIGKILL, which loses the
+	// summary and the device inventory. Now the second one terminates.
+	go func() {
+		<-ctx.Done()
+		stop()
+		if !cf.quiet {
+			fmt.Fprintln(os.Stderr, "\nstopping; press ctrl-c again to abort")
+		}
+	}()
+
 	enc := json.NewEncoder(os.Stdout)
 	counts := map[model.Severity]int{}
 	total := 0
