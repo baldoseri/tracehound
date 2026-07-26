@@ -374,6 +374,89 @@ func TestDNSTunnelDetectsEncodedSubdomains(t *testing.T) {
 	}
 }
 
+// tunnelQueries sends n never-repeated high-entropy TXT lookups under one
+// domain, starting at from and spaced by gap, and returns the time after the
+// last one.
+func tunnelQueries(e *Engine, r *lcg, from time.Time, gap time.Duration, n int) time.Time {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+	at := from
+	for i := 0; i < n; i++ {
+		var sb strings.Builder
+		for j := 0; j < 40; j++ {
+			sb.WriteByte(alphabet[r.intn(len(alphabet))])
+		}
+		p := dnsPacket(sb.String()+".tunnel.example.net", dnsTypeTXT, at)
+		e.Packet(&p, nil, false)
+		at = at.Add(gap)
+	}
+	return at
+}
+
+// TestDNSTunnelRateDescribesTheWindow is the reported-number half of the
+// windowing bug.
+//
+// queries_per_min is what an analyst reads to judge how much data is moving.
+// It used to be lifetime queries divided by the span since the track was
+// created, so a burst that stopped was averaged over everything that followed:
+// a tunnel running at over a hundred queries a minute for thirty seconds was
+// reported at single digits an hour later, on the same evidence.
+func TestDNSTunnelRateDescribesTheWindow(t *testing.T) {
+	d := NewDNSTunnel(DNSTunnelConfig{History: 10 * time.Minute})
+	e, col := newTestEngine(d)
+
+	r := lcg(7)
+	// 60 queries in 30 seconds: 120 a minute.
+	at := tunnelQueries(e, &r, t0, 500*time.Millisecond, 60)
+	e.Tick(at)
+
+	alerts := col.byRule(RuleDNSTunnel)
+	if len(alerts) == 0 {
+		t.Fatal("no alert for a burst of encoded lookups")
+	}
+	rate, _ := alerts[0].Evidence["queries_per_min"].(float64)
+	if rate < 100 {
+		t.Errorf("queries_per_min = %v immediately after a 120/min burst, want at least 100", rate)
+	}
+	t.Logf("rate reported at the burst: %v per minute", rate)
+}
+
+// TestDNSTunnelEvidenceLeavesTheWindow is the threshold half.
+//
+// History was documented as how long a domain's evidence is retained, but the
+// only expiry deleted a track that had gone entirely silent. A domain that kept
+// a trickle of traffic alive accumulated evidence for the life of the process,
+// so a burst that ended hours ago still counted toward MinQueries and still
+// scored.
+func TestDNSTunnelEvidenceLeavesTheWindow(t *testing.T) {
+	d := NewDNSTunnel(DNSTunnelConfig{History: time.Minute, MinQueries: 30})
+	e, col := newTestEngine(d)
+
+	r := lcg(11)
+	// A burst well past MinQueries, then silence long enough to leave it behind.
+	at := tunnelQueries(e, &r, t0, 100*time.Millisecond, 40)
+	e.Tick(at)
+	if len(col.byRule(RuleDNSTunnel)) == 0 {
+		t.Fatal("the burst itself did not alert, so the rest proves nothing")
+	}
+	before := len(col.byRule(RuleDNSTunnel))
+
+	// Two hours later, a few more queries: nowhere near MinQueries on their own.
+	// The old code still held all 40 from the burst and would score them again.
+	//
+	// The gap has to clear the engine's duplicate cooldown as well as History.
+	// At ten minutes this test passed against the unwindowed code, because the
+	// engine suppressed the second alert and the detector was never the reason
+	// nothing appeared.
+	at = at.Add(2 * time.Hour)
+	at = tunnelQueries(e, &r, at, 100*time.Millisecond, 5)
+	e.Tick(at)
+
+	if got := len(col.byRule(RuleDNSTunnel)); got != before {
+		t.Errorf("%d alerts after the burst aged out, want the original %d: "+
+			"expired evidence is still counting toward the threshold", got, before)
+	}
+}
+
 func TestDNSTunnelIgnoresNormalResolution(t *testing.T) {
 	d := NewDNSTunnel(DNSTunnelConfig{})
 	e, col := newTestEngine(d)
