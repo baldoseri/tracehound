@@ -3,10 +3,9 @@
 package capture
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"net"
+	"sync/atomic"
 
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcapgo"
@@ -32,6 +31,11 @@ type LiveSource struct {
 
 	// dropped accumulates the kernel's destructive-read drop counter.
 	dropped uint64
+
+	// closed distinguishes a socket we shut down from one that failed. It is
+	// read on the capture goroutine and written by Interrupt or Close, which
+	// may be called from another, so it has to be atomic.
+	closed atomic.Bool
 }
 
 // OpenLive begins capturing on iface.
@@ -63,7 +67,13 @@ func (s *LiveSource) Next() (model.Packet, error) {
 	for {
 		data, ci, err := s.h.ZeroCopyReadPacketData()
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			// Whether this is a shutdown or a real failure is decided by our
+			// own flag rather than by inspecting the error, because the error
+			// cannot be inspected: pcapgo formats it with %s, not %w, so the
+			// chain is broken and errors.Is can never match anything through
+			// it. The io.EOF check that used to be here was unreachable for
+			// that reason.
+			if s.closed.Load() {
 				return model.Packet{}, ErrDone
 			}
 			return model.Packet{}, err
@@ -100,8 +110,26 @@ func (s *LiveSource) Stats() Stats {
 	return st
 }
 
+// Interrupt implements Interrupter.
+//
+// AF_PACKET offers no read deadline and EthernetHandle exposes no way to set
+// one, so closing the socket is the only thing that will wake a read that is
+// waiting on a link with no traffic. The flag is set first: the reader has to
+// see "we did this" before it sees the error the close produces, or a clean
+// shutdown is reported as a capture failure.
+//
+// Safe to call repeatedly, and safe to call alongside Close.
+func (s *LiveSource) Interrupt() error {
+	if s.closed.Swap(true) {
+		return nil
+	}
+	return s.h.Close()
+}
+
 // Close implements Source.
 func (s *LiveSource) Close() error {
-	s.h.Close()
-	return nil
+	if s.closed.Swap(true) {
+		return nil
+	}
+	return s.h.Close()
 }

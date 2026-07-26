@@ -48,3 +48,17 @@ type Source interface {
 	// Close releases the underlying handle.
 	Close() error
 }
+
+// Interrupter is implemented by sources whose Next can block with no bound.
+//
+// A file source always returns promptly, so it does not need this. A live
+// interface does: AF_PACKET has no read deadline, and gopacket's
+// EthernetHandle exposes no way to set one, so a read on a silent link waits
+// for a packet that may never come. Cancelling the context cannot help on its
+// own, because nothing is checked until the read returns.
+//
+// Interrupt makes the pending read fail so the capture loop can finish. It must
+// be safe to call from another goroutine, and safe to call more than once.
+type Interrupter interface {
+	Interrupt() error
+}

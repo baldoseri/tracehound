@@ -187,12 +187,32 @@ func (p *Pipeline) Run(ctx context.Context, src capture.Source) (Stats, error) {
 	p.wallStart = start
 	p.startNano.Store(start.UnixNano())
 
-	// Cancellation is checked periodically rather than per packet: a select on
-	// every packet costs more than the check is worth at line rate.
-	const cancelCheckEvery = 4096
+	// A live source can block in a read that no amount of checking will
+	// interrupt, so cancellation has to reach the socket rather than the loop.
+	// Without this a cancelled sniff waits for the next packet, which on a
+	// quiet link may never arrive, and is eventually killed instead of shutting
+	// down: the run summary is lost and so is SaveDevices, which only runs
+	// after Run returns.
+	if in, ok := src.(capture.Interrupter); ok {
+		stopped := make(chan struct{})
+		defer close(stopped)
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = in.Interrupt()
+			case <-stopped:
+			}
+		}()
+	}
 
-	for {
-		if p.nPackets.Load()%cancelCheckEvery == 0 {
+	// Cancellation is also checked periodically, which is what covers sources
+	// that cannot be interrupted. The counter is local rather than nPackets,
+	// because a modulo on a counter this loop does not own only fires when it
+	// lands exactly on a multiple.
+	const cancelCheckEvery = 512
+
+	for n := uint64(0); ; n++ {
+		if n%cancelCheckEvery == 0 {
 			select {
 			case <-ctx.Done():
 				p.finish(src, start)
