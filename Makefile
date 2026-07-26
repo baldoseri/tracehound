@@ -75,9 +75,12 @@ cover:
 bench:
 	$(GO) test ./... -run '^$$' -bench . -benchmem
 
-## fuzz: fuzz the TLS ClientHello parser for 60s
+## fuzz: fuzz every parser that reads untrusted input, 60s each
 fuzz:
 	$(GO) test ./internal/fingerprint -run '^$$' -fuzz FuzzParseClientHello -fuzztime 60s
+	$(GO) test ./internal/fingerprint -run '^$$' -fuzz FuzzParseServerHello -fuzztime 60s
+	$(GO) test ./internal/quic -run '^$$' -fuzz FuzzParseInitial -fuzztime 60s
+	$(GO) test ./internal/quic -run '^$$' -fuzz FuzzParseFrames -fuzztime 60s
 
 ## vet: run go vet and check formatting
 vet:

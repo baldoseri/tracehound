@@ -158,7 +158,10 @@ func clientHelloBody(sni string, pad int) []byte {
 // sealInitial wraps the exported builder so the round-trip tests exercise the
 // same code the capture generator uses, rather than a parallel implementation
 // that could drift away from it.
-func sealInitial(t *testing.T, dcid, scid []byte, cryptoOffset uint64, crypto []byte, datagramSize int) []byte {
+// Takes testing.TB rather than *testing.T so fuzz seeds can build packets too,
+// which is what stops FuzzParseInitial being seeded with input the header check
+// rejects outright.
+func sealInitial(t testing.TB, dcid, scid []byte, cryptoOffset uint64, crypto []byte, datagramSize int) []byte {
 	t.Helper()
 	pkt, err := BuildClientInitial(dcid, scid, cryptoOffset, crypto, datagramSize)
 	if err != nil {
@@ -347,15 +350,27 @@ func TestMalformedNeverPanics(t *testing.T) {
 }
 
 func FuzzParseInitial(f *testing.F) {
+	// The only seed used to be 1200 zero bytes, which is rejected by three
+	// comparisons in the header check before any parsing happens. Everything
+	// past the header was therefore unreachable in principle, not merely
+	// unreached: 26 seconds of fuzzing produced 11.9M executions and zero new
+	// coverage. Seeding with real packets is what gives the mutator a header
+	// worth mutating.
 	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
-	f.Add(make([]byte, 1200))
+	scid := []byte{1, 2, 3, 4}
+
+	f.Add(sealInitial(f, dcid, scid, 0, clientHelloBody("example.com", 0), MinInitialDatagram))
+	f.Add(sealInitial(f, dcid, nil, 0, clientHelloBody("a.example", 0), MinInitialDatagram))
+	f.Add(sealInitial(f, dcid, scid, 200, []byte("second flight fragment"), MinInitialDatagram))
+	f.Add(make([]byte, 1200)) // kept: the rejection path is worth covering too
+	f.Add([]byte{0xc0})
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		pkt, err := ParseInitial(data)
 		if err == nil && pkt == nil {
 			t.Fatal("nil packet with nil error")
 		}
 	})
-	_ = dcid
 }
 
 // --- helpers ----------------------------------------------------------------

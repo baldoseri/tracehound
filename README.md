@@ -439,12 +439,20 @@ The second test is the one that does the work. Any detector can be made to fire 
 lowering a threshold; staying quiet about the ordinary traffic sitting beside the attack
 is the difficult half.
 
-Coverage: `fingerprint` 90%, `pipeline` 86%, `detect` 83%, `rules` 82%, `flow` 82%,
-`quic` 82%, `store` 81%, `api` 79%.
+Coverage of the analysis packages: `pipeline` 90%, `fingerprint` 89%, `quic` 87%,
+`detect` 86%, `flow` 83%, `rules` 82%, `store` 81%, `api` 79%. Repository total 61%.
 
-CI also runs the race detector, a 90 second fuzz of the TLS parser on every pull
-request, cross-compilation for five platforms, and an end-to-end demo that fails the
-build if any rule stops firing.
+The total is lower than any of those because of three packages that drag it down for
+reasons worth naming rather than hiding. `capture` is at 45%: the AF_PACKET path is
+Linux-only and needs `CAP_NET_RAW`, so no test can open one, and what is covered is the
+file-replay half. `model` and `pcapgen` read 0% only because coverage is measured per
+package and both are exercised entirely from other packages' tests. `cmd` is thin glue
+over code that is tested where it lives.
+
+CI also runs the race detector, a 45 second fuzz of each parser that reads untrusted
+input on every pull request (the TLS ClientHello and ServerHello parsers, QUIC Initial
+decryption, and the QUIC frame walk), cross-compilation for five platforms, and an
+end-to-end demo that fails the build if any rule stops firing.
 
 ---
 
