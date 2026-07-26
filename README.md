@@ -321,9 +321,14 @@ key, iv, hp           = HKDF-Expand-Label(client_initial_secret, "quic key" / "q
 
 Strip the header protection with an AES block over a ciphertext sample, open the payload
 with AES-128-GCM, pull the CRYPTO frames out, and the handshake is the same ClientHello
-the TCP path already parses. The key schedule is checked against the worked example in
-RFC 9001 Appendix A, so the test fails if the implementation is wrong rather than
-agreeing with itself.
+the TCP path already parses.
+
+Two RFC 9001 vectors keep that honest. Appendix A.1 checks the key schedule, and
+Appendix A.2 is the whole thing: the specification's own 1200-byte protected packet goes
+in, and the ClientHello that comes out has to match the plaintext the RFC publishes,
+byte for byte. That matters more than it sounds. Every other test here is a round trip
+against this project's own encoder, which a shared misreading of the specification would
+pass; a packet produced by someone else, from the specification itself, will not.
 
 The same client over both transports produces the same fingerprint apart from JA4's
 leading character, `t` for TCP and `q` for QUIC, and there is a test asserting exactly
