@@ -98,6 +98,80 @@ func TestParseInitialAgainstRFC9001A2(t *testing.T) {
 	}
 }
 
+// TestParseInitialAgainstRFC9369A2 is the same check for QUIC version 2.
+//
+// Version 2 exists to exercise version negotiation and defeat ossification, so
+// it changes things deliberately rather than incidentally: the Initial salt
+// (RFC 9369 section 3.3.1), all three packet-protection labels (3.3.2), and the
+// long-header type numbering, which makes an Initial 0b01 where version 1 makes
+// it 0b00 (3.2). Any one of those left at its version 1 value fails the tag.
+//
+// The RFC pairs its vector with the same ClientHello as RFC 9001, so the
+// expected plaintext fixture is shared. That is what makes this test sharp: the
+// input and the output are held constant and only the version machinery varies,
+// so a failure can only be in the parameters this change introduced.
+func TestParseInitialAgainstRFC9369A2(t *testing.T) {
+	packet := readHexFixture(t, "rfc9369_a2_packet.hex")
+	frame := readHexFixture(t, "rfc9001_a2_crypto_frame.hex")
+
+	if len(packet) != 1200 {
+		t.Fatalf("fixture is %d bytes, want the 1200 the RFC publishes", len(packet))
+	}
+
+	pkt, err := ParseInitial(packet)
+	if err != nil {
+		t.Fatalf("ParseInitial: %v", err)
+	}
+	if pkt.Version != Version2 {
+		t.Errorf("Version = %#08x, want %#08x", pkt.Version, Version2)
+	}
+	wantDCID := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+	if !bytes.Equal(pkt.DCID, wantDCID) {
+		t.Errorf("DCID = %x, want %x", pkt.DCID, wantDCID)
+	}
+
+	if len(pkt.Frames) != 1 {
+		t.Fatalf("recovered %d CRYPTO frames, want 1", len(pkt.Frames))
+	}
+	if wantHello := frame[4:]; !bytes.Equal(pkt.Frames[0].Data, wantHello) {
+		t.Errorf("recovered handshake bytes do not match the RFC\n got %d bytes\nwant %d bytes",
+			len(pkt.Frames[0].Data), len(wantHello))
+	}
+}
+
+// TestVersionParametersAreDistinct guards against the failure this change is
+// most likely to produce later: copying the version 1 parameters for version 2
+// and updating only the salt. Every field has to differ except the packet type
+// mask itself, and a shared value here would authenticate nothing.
+func TestVersionParametersAreDistinct(t *testing.T) {
+	v1, ok := paramsFor(Version1)
+	if !ok {
+		t.Fatal("version 1 is not recognised")
+	}
+	v2, ok := paramsFor(Version2)
+	if !ok {
+		t.Fatal("version 2 is not recognised")
+	}
+
+	if bytes.Equal(v1.salt, v2.salt) {
+		t.Error("both versions share an Initial salt")
+	}
+	if v1.keyLabel == v2.keyLabel || v1.ivLabel == v2.ivLabel || v1.hpLabel == v2.hpLabel {
+		t.Errorf("shared key-derivation label: v1=%q/%q/%q v2=%q/%q/%q",
+			v1.keyLabel, v1.ivLabel, v1.hpLabel, v2.keyLabel, v2.ivLabel, v2.hpLabel)
+	}
+	if v1.initialType == v2.initialType {
+		t.Error("both versions expect the same long-header type for Initial")
+	}
+
+	// A draft or future version must still be refused rather than guessed at.
+	for _, v := range []uint32{0x00000000, 0xff00001d, 0x6b3343ce, 0x00000002} {
+		if _, ok := paramsFor(v); ok {
+			t.Errorf("version %#08x was accepted", v)
+		}
+	}
+}
+
 // TestRFC9001A2CarriesTheExpectedHandshake reads the recovered bytes as a TLS
 // ClientHello, without involving the fingerprint package, which would make this
 // a test of two things at once.

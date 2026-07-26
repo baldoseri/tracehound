@@ -7,11 +7,11 @@ import (
 
 // Errors reported by ParseInitial.
 var (
-	// ErrNotInitial means the datagram is not a QUIC v1 client Initial packet.
-	// This is the overwhelmingly common outcome on a real network, where most
-	// UDP is DNS, QUIC short-header packets, or something else entirely, so it
-	// carries no diagnostic weight.
-	ErrNotInitial = errors.New("quic: not a v1 Initial packet")
+	// ErrNotInitial means the datagram is not a client Initial packet in a
+	// version we understand. This is the overwhelmingly common outcome on a
+	// real network, where most UDP is DNS, QUIC short-header packets, or
+	// something else entirely, so it carries no diagnostic weight.
+	ErrNotInitial = errors.New("quic: not a supported Initial packet")
 	// ErrMalformed means the packet claims to be an Initial but does not parse.
 	ErrMalformed = errors.New("quic: malformed Initial packet")
 )
@@ -23,13 +23,17 @@ const MaxCryptoBytes = 16384
 
 // Long header bit layout, RFC 9000 section 17.2.
 const (
-	headerFormLong  = 0x80
-	fixedBit        = 0x40
-	longTypeMask    = 0x30
-	longTypeInitial = 0x00
-	pnLengthMask    = 0x03
-	sampleOffset    = 4  // sample starts 4 bytes past the packet number offset
-	sampleLength    = 16 // AES block size
+	headerFormLong = 0x80
+	fixedBit       = 0x40
+	longTypeMask   = 0x30
+	// The type field is renumbered in v2. RFC 9369 section 3.2 makes Initial
+	// 0b01 where RFC 9000 makes it 0b00, so the same two bits mean different
+	// packets depending on the version four bytes further along.
+	longTypeInitialV1 = 0x00 // 0b00 << 4
+	longTypeInitialV2 = 0x10 // 0b01 << 4
+	pnLengthMask      = 0x03
+	sampleOffset      = 4  // sample starts 4 bytes past the packet number offset
+	sampleLength      = 16 // AES block size
 )
 
 // CryptoFrame is one fragment of the TLS handshake stream.
@@ -48,6 +52,11 @@ type InitialPacket struct {
 
 // ParseInitial decrypts every client Initial packet in a datagram and returns
 // the CRYPTO frames they carry.
+//
+// QUIC version 1 (RFC 9000) and version 2 (RFC 9369) are both handled. They
+// differ by more than a version number: the Initial salt, all three
+// key-derivation labels and the long-header packet type numbering all change,
+// so the version field selects a set of parameters rather than just a constant.
 //
 // A datagram can coalesce several QUIC packets, so this walks the whole thing
 // rather than stopping after the first. Non-Initial packets and packets that
@@ -112,11 +121,16 @@ func parseOnePacket(datagram []byte, off int) (*InitialPacket, int, error) {
 		return nil, 0, ErrTruncated
 	}
 
-	isInitial := version == Version1 && first&longTypeMask == longTypeInitial
+	// A version we do not know is not merely a packet we skip: its header
+	// layout is undefined to us, so we cannot even measure it to find the next
+	// packet in the datagram.
+	params, known := paramsFor(version)
+
+	isInitial := known && first&longTypeMask == params.initialType
 	if !isInitial {
 		// Skip it if we can measure it. Version Negotiation and Retry packets
 		// have no Length field, so the walk simply stops.
-		if version != Version1 {
+		if !known {
 			return nil, 0, ErrNotInitial
 		}
 		tokenSkip := r.varint()
