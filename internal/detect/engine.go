@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -61,6 +62,9 @@ type Config struct {
 	// 500 MB arriving is a software update.
 	HomeNets []netip.Prefix
 
+	// MaxSuppressionEntries bounds how many distinct findings the engine
+	// remembers for duplicate suppression. Zero selects the default.
+	MaxSuppressionEntries int
 	// AlertCooldown is the minimum gap between two identical alerts. Without
 	// it a host beaconing every 30 seconds would produce an alert on every
 	// tick forever, and the analyst would mute the tool by the end of the day.
@@ -100,6 +104,13 @@ func (c Config) withDefaults() Config {
 	}
 	if c.AlertCooldown <= 0 {
 		c.AlertCooldown = 10 * time.Minute
+	}
+	if c.MaxSuppressionEntries <= 0 {
+		// Deliberately far above what a real network reaches. This is a
+		// backstop against traffic that mints endpoint pairs, not a working
+		// limit, and every entry it holds is one restatement kept out of the
+		// output.
+		c.MaxSuppressionEntries = 250_000
 	}
 	return c
 }
@@ -166,13 +177,25 @@ type Engine struct {
 	lastSeen   map[string]alertState
 	emitted    uint64
 	suppressed uint64
+	dropped    uint64
 	filtered   uint64
 }
 
 // alertState remembers what was last said about one finding, so the engine can
 // tell a genuinely new observation from a restatement of the old one.
 type alertState struct {
-	at       time.Time
+	// at is when this finding was last *reported*, and is what the cooldown
+	// measures against.
+	at time.Time
+	// touched is when it was last seen at all, reported or suppressed, and is
+	// used only to decide what to drop when the map is over its bound.
+	//
+	// The two have to be separate. Suppressing an alert deliberately leaves at
+	// alone, or a finding that kept recurring would push its own cooldown
+	// forward forever and never be restated. But that also means at stops
+	// moving for exactly the findings that are most active, so evicting on it
+	// throws out the busiest entries first, which is precisely backwards.
+	touched  time.Time
 	severity model.Severity
 	digest   uint64
 }
@@ -251,6 +274,54 @@ func (e *Engine) Tick(now time.Time) {
 	}
 }
 
+// boundSuppression drops the least recently seen findings once the suppression
+// map exceeds its cap. Callers must hold e.mu.
+//
+// The map had no delete anywhere: one entry per distinct detector, rule and
+// pair of addresses, held for the life of the process. The key includes both
+// addresses, so its size is chosen by whoever is generating the traffic.
+//
+// Expiring by age was the obvious fix and is the wrong one. Suppression is
+// deliberately not time-based: a detector whose window has not moved re-derives
+// identical numbers on every tick, and TestSuppressionDropsUnchangedEvidence
+// exists to keep those out of the output no matter how long the run. Dropping
+// entries on age would let exactly that noise back in.
+//
+// Bounding by count keeps the contract for every finding the sensor is actually
+// tracking and gives it up only when the map is already at a size no real
+// network produces. A dropped entry means one restatement of a finding that has
+// been silent longer than any other, which is the least bad thing to lose.
+func (e *Engine) boundSuppression() {
+	if len(e.lastSeen) <= e.cfg.MaxSuppressionEntries {
+		return
+	}
+	// Two passes over a map that is at its cap, on an event that happens once
+	// per quarter-cap insertions. Collecting the times and cutting at the
+	// lower quartile avoids doing this again on the very next alert.
+	times := make([]time.Time, 0, len(e.lastSeen))
+	for _, s := range e.lastSeen {
+		times = append(times, s.touched)
+	}
+	slices.SortFunc(times, func(a, b time.Time) int { return a.Compare(b) })
+
+	cutoff := times[len(times)/4]
+	for k, s := range e.lastSeen {
+		if s.touched.Before(cutoff) {
+			delete(e.lastSeen, k)
+			e.dropped++
+		}
+	}
+}
+
+// touch records that a finding was seen again without reporting it. Callers
+// must hold e.mu.
+func (e *Engine) touch(key string, s alertState, at time.Time) {
+	if at.After(s.touched) {
+		s.touched = at
+		e.lastSeen[key] = s
+	}
+}
+
 // Stats returns engine counters.
 func (e *Engine) Stats() Stats {
 	e.mu.Lock()
@@ -288,18 +359,21 @@ func (e *Engine) emit(a model.Alert) {
 	if prev, ok := e.lastSeen[key]; ok {
 		switch {
 		case prev.digest == digest:
+			e.touch(key, prev, a.Time)
 			e.suppressed++
 			e.mu.Unlock()
 			return
 		case a.Severity > prev.severity:
 			// Escalation: fall through and report immediately.
 		case a.Time.Sub(prev.at) < e.cfg.AlertCooldown:
+			e.touch(key, prev, a.Time)
 			e.suppressed++
 			e.mu.Unlock()
 			return
 		}
 	}
-	e.lastSeen[key] = alertState{at: a.Time, severity: a.Severity, digest: digest}
+	e.lastSeen[key] = alertState{at: a.Time, touched: a.Time, severity: a.Severity, digest: digest}
+	e.boundSuppression()
 	e.emitted++
 	e.mu.Unlock()
 

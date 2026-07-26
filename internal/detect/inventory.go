@@ -47,6 +47,19 @@ type InventoryConfig struct {
 	MinAge time.Duration
 	// MaxDevices bounds the inventory.
 	MaxDevices int
+	// MaxFingerprints bounds the set of distinct JA4s tracked.
+	//
+	// Sibling to MaxDevices, and it was missing. The device map was capped
+	// while the fingerprint map beside it grew without limit, which is the
+	// wrong way round for a daemon: a network can only hold so many hosts,
+	// but a host that varies its TLS stack, or an attacker who chooses to,
+	// can mint fingerprints indefinitely.
+	MaxFingerprints int
+	// MaxJA4sPerDevice bounds the per-device fingerprint list.
+	//
+	// The list is display detail, and it is scanned linearly on the packet
+	// path, so an unbounded one costs time as well as memory.
+	MaxJA4sPerDevice int
 	// SilenceNewDevice suppresses the informational new-host alert. Phrased as
 	// an opt-out so the zero value behaves like the documented default.
 	SilenceNewDevice bool
@@ -65,6 +78,8 @@ func DefaultInventoryConfig() InventoryConfig {
 		MinObservations:          3,
 		MinAge:                   10 * time.Minute,
 		MaxDevices:               100_000,
+		MaxFingerprints:          100_000,
+		MaxJA4sPerDevice:         32,
 	}
 }
 
@@ -113,6 +128,12 @@ func NewInventory(cfg InventoryConfig) *Inventory {
 	}
 	if cfg.MaxDevices > 0 {
 		d.MaxDevices = cfg.MaxDevices
+	}
+	if cfg.MaxFingerprints > 0 {
+		d.MaxFingerprints = cfg.MaxFingerprints
+	}
+	if cfg.MaxJA4sPerDevice > 0 {
+		d.MaxJA4sPerDevice = cfg.MaxJA4sPerDevice
 	}
 	d.SilenceNewDevice = cfg.SilenceNewDevice
 	return &Inventory{
@@ -200,11 +221,17 @@ func (in *Inventory) OnFlowClosed(c *Context, f *model.Flow) {
 	if f.JA4 == "" {
 		return
 	}
-	if !slices.Contains(dev.JA4s, f.JA4) {
+	if len(dev.JA4s) < in.cfg.MaxJA4sPerDevice && !slices.Contains(dev.JA4s, f.JA4) {
 		dev.JA4s = append(dev.JA4s, f.JA4)
 	}
 	info, ok := in.ja4[f.JA4]
 	if !ok {
+		// Refuse rather than evict, matching the device map. Evicting would
+		// silently reshape the baseline that rarity is measured against, and a
+		// baseline that quietly changes is worse than one that stops growing.
+		if len(in.ja4) >= in.cfg.MaxFingerprints {
+			return
+		}
 		info = &ja4Info{hosts: make(map[netip.Addr]struct{}), first: f.FirstSeen}
 		in.ja4[f.JA4] = info
 	}
