@@ -371,24 +371,24 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 
 	// Ctrl-C stops the capture cleanly so the summary still prints — a sensor
 	// that loses its findings when you stop it is not much use.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// Hand the next signal back to the runtime as soon as the first arrives.
 	//
-	// NotifyContext keeps the signal registered until stop is called, and stop
-	// was deferred to the end of this function, so during shutdown every
-	// further Ctrl-C went into a one-deep channel nobody reads. The default
-	// handler being disabled, there was no way to abort a shutdown that was
-	// itself stuck, and the only remaining option was SIGKILL, which loses the
-	// summary and the device inventory. Now the second one terminates.
-	go func() {
-		<-ctx.Done()
-		stop()
+	// Deliberately not signal.NotifyContext. That gives back only a context,
+	// and a context cancelled by a signal is indistinguishable from one
+	// cancelled by the deferred stop on the ordinary path, so anything reacting
+	// to cancellation also fires on a run that simply finished. Watching the
+	// channel says which happened.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigc)
+
+	go watchSignals(ctx, sigc, cancel, func() {
 		if !cf.quiet {
 			fmt.Fprintln(os.Stderr, "\nstopping; press ctrl-c again to abort")
 		}
-	}()
+	})
 
 	enc := json.NewEncoder(os.Stdout)
 	counts := map[model.Severity]int{}
@@ -692,6 +692,29 @@ func orNone(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// watchSignals cancels the run on the first signal and stays quiet when the run
+// simply finished.
+//
+// Split out because the difference between those two cases is the whole point
+// and it is easy to lose. An earlier version waited on ctx.Done() alone, which
+// a signal and an ordinary return both trigger, so every completed replay
+// announced that it was stopping and offered a way to abort it.
+//
+// On a real signal it also unregisters the handler, handing the next one back
+// to the runtime. While the handler stays installed, every further Ctrl-C goes
+// into a one-deep channel nobody reads and the default behaviour is disabled,
+// so a shutdown that is itself stuck cannot be abandoned and the only way out
+// is SIGKILL, which loses the run summary and the device inventory.
+func watchSignals(ctx context.Context, sigc chan os.Signal, cancel context.CancelFunc, announce func()) {
+	select {
+	case <-sigc:
+		cancel()
+		signal.Stop(sigc)
+		announce()
+	case <-ctx.Done():
+	}
 }
 
 // browseURL turns a listen address into something clickable in a terminal.
