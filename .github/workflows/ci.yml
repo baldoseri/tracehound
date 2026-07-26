@@ -85,7 +85,7 @@ jobs:
         run: go tool cover -func=coverage.out | tail -n 20
 
   fuzz:
-    name: fuzz the TLS parser
+    name: fuzz the wire parsers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
