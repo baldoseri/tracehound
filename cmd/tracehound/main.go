@@ -955,6 +955,14 @@ func printSummary(s pipeline.Stats, counts map[model.Severity]int, total int) {
 	// mostly QUIC, which is a fact about the network, not a fault.
 	fmt.Fprintf(os.Stderr, "tls        %d clients, %d servers fingerprinted\n",
 		s.Fingerprints, s.ServerFingerprints)
+	// Reported as a share, because the number that matters is not how many
+	// clients used ECH but how much of the server-name evidence in everything
+	// above still points at a real destination.
+	if s.ECHClients > 0 {
+		pct := 100 * float64(s.ECHClients) / float64(s.Fingerprints)
+		fmt.Fprintf(os.Stderr, "ech        %d of those hid their destination (%.1f%%; server names below are the front door)\n",
+			s.ECHClients, pct)
+	}
 	fmt.Fprintf(os.Stderr, "throughput %.0f packets/sec (%s wall)\n", s.PacketsPerSecond(), s.Elapsed.Round(time.Millisecond))
 
 	order := []model.Severity{model.SevCritical, model.SevHigh, model.SevMedium, model.SevLow, model.SevInfo}

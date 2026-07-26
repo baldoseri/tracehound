@@ -81,13 +81,18 @@ type Stats struct {
 	// ServerFingerprints counts JA4S recovered from ServerHellos. Always the
 	// smaller number: a QUIC server's response is encrypted under keys an
 	// observer never sees, so only TCP flows contribute.
-	ServerFingerprints uint64        `json:"server_fingerprints"`
-	Flow               flow.Stats    `json:"flows"`
-	Detect             detect.Stats  `json:"detect"`
-	Capture            capture.Stats `json:"capture"`
-	Elapsed            time.Duration `json:"-"`
-	FirstPacket        time.Time     `json:"first_packet"`
-	LastPacket         time.Time     `json:"last_packet"`
+	ServerFingerprints uint64 `json:"server_fingerprints"`
+	// ECHClients counts fingerprinted clients that offered Encrypted
+	// ClientHello. Reported as a proportion of Fingerprints rather than on its
+	// own, because what it measures is how much of this sensor's SNI-derived
+	// signal still describes a real destination.
+	ECHClients  uint64        `json:"ech_clients"`
+	Flow        flow.Stats    `json:"flows"`
+	Detect      detect.Stats  `json:"detect"`
+	Capture     capture.Stats `json:"capture"`
+	Elapsed     time.Duration `json:"-"`
+	FirstPacket time.Time     `json:"first_packet"`
+	LastPacket  time.Time     `json:"last_packet"`
 }
 
 // PacketsPerSecond is the processing rate achieved, for benchmarking output.
@@ -122,6 +127,7 @@ type Pipeline struct {
 	nUndecodable  atomic.Uint64
 	nFingerprints atomic.Uint64
 	nServerPrints atomic.Uint64
+	nECH          atomic.Uint64
 	firstNano     atomic.Int64
 	lastNano      atomic.Int64
 	startNano     atomic.Int64
@@ -195,6 +201,7 @@ func (p *Pipeline) Stats() Stats {
 		Fingerprints: p.nFingerprints.Load(),
 
 		ServerFingerprints: p.nServerPrints.Load(),
+		ECHClients:         p.nECH.Load(),
 
 		Capture: captureStats,
 		Elapsed: elapsed,
@@ -373,6 +380,14 @@ func (p *Pipeline) fingerprintClient(key model.FlowKey, pkt *model.Packet, f *mo
 	// API reads these same records concurrently. See Table.SetFingerprint.
 	p.table.SetFingerprint(key, res.JA4, res.JA3, res.ServerName, res.ALPN)
 	p.nFingerprints.Add(1)
+	if res.HasECH {
+		// Counted rather than alerted on. ECH is a privacy feature shipping in
+		// mainstream browsers, so treating each use as a finding would bury the
+		// output in noise about ordinary traffic. What an operator needs is the
+		// proportion, because it says how much of the SNI-derived signal in
+		// this tool still means anything.
+		p.nECH.Add(1)
+	}
 }
 
 // fingerprintServer recovers JA4S from a ServerHello.

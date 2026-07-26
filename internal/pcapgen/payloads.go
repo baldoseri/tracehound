@@ -30,6 +30,11 @@ type helloSpec struct {
 	supportedVersions []uint16
 	padTo             int // extra padding extension to reach a realistic size
 	grease            bool
+	// ech adds an outer encrypted_client_hello extension, as a browser does
+	// when the destination publishes an ECH configuration. The sni above then
+	// carries the provider's public name rather than the real one, which is
+	// exactly the situation the sensor has to report honestly.
+	ech bool
 }
 
 // chromeHello is a TLS 1.3 profile with GREASE and a wide extension set.
@@ -52,9 +57,14 @@ func chromeHello(sni string) []byte {
 }
 
 // firefoxHello is a second TLS 1.3 profile: same era, different stack.
+//
+// It carries Encrypted ClientHello, which Firefox enables by default, so the
+// capture contains both kinds of client and the sensor's ECH share is a real
+// number rather than always zero.
 func firefoxHello(sni string) []byte {
 	return buildHello(helloSpec{
 		legacyVersion: 0x0303,
+		ech:           true,
 		ciphers: []uint16{
 			0x1301, 0x1303, 0x1302, 0xc02b, 0xc02f, 0xcca9, 0xcca8,
 			0xc02c, 0xc030, 0xc00a, 0xc009, 0xc013, 0xc014, 0x002f, 0x0035, 0x000a,
@@ -194,6 +204,21 @@ func buildHandshake(s helloSpec) []byte {
 						l.u16(v)
 					}
 				})
+			})
+		}
+		if s.ech {
+			// Outer ECHClientHello: type 0, HPKE suite, config id, then the
+			// public key and the encrypted inner hello. The bodies are filler
+			// because nothing downstream reads them; what matters on the wire
+			// is that the extension is present and well formed.
+			exts.u16(0xfe0d)
+			exts.lenPrefixed(2, func(e *builder) {
+				e.u8(0)       // outer
+				e.u16(0x0001) // HKDF-SHA256
+				e.u16(0x0001) // AES-128-GCM
+				e.u8(11)      // config id
+				e.lenPrefixed(2, func(w *builder) { w.raw(make([]byte, 32)) })
+				e.lenPrefixed(2, func(w *builder) { w.raw(make([]byte, 160)) })
 			})
 		}
 		if s.padTo > 0 && len(exts.b) < s.padTo {

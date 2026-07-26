@@ -337,6 +337,33 @@ guarantees neither and a post-quantum hello does not fit in one Initial.
 
 See [`internal/quic`](internal/quic).
 
+### What Encrypted ClientHello does to all of this
+
+ECH is the development most likely to make this approach less useful, so the sensor
+measures it rather than waiting to be surprised by it:
+
+```
+tls        151 clients, 124 servers fingerprinted
+ech        56 of those hid their destination (37.1%; server names below are the front door)
+```
+
+The distinction worth being precise about is that **ECH hides where a client is going, not
+what it is**. The fingerprint survives, because JA4 measures the shape of the hello: the
+cipher list, the extension list, the ALPN. All of that is in the outer hello, which has to
+stay readable for the connection to work at all. Offering ECH is itself part of that shape,
+so a client that uses it and one that does not are correctly different fingerprints.
+
+What does not survive is the server name. Under ECH the SNI in the outer hello is the
+provider's public name, so anything reasoning about a destination is describing the front
+door. In this tool that touches TH-0005, which names the host a transfer went to. The
+fingerprint-based detections are unaffected, which is a large part of why fingerprinting
+was worth building in the first place.
+
+One honest limit: a passive observer cannot distinguish real ECH from GREASE ECH, where a
+client sends a decoy extension to keep the code path exercised. That is deliberate in the
+design, and it means the share above is an upper bound on how many connections are really
+concealing anything.
+
 ---
 
 ## How it works

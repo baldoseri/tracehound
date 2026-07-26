@@ -61,6 +61,16 @@ const (
 	extSignatureAlgorithms uint16 = 0x000d
 	extALPN                uint16 = 0x0010
 	extSupportedVersions   uint16 = 0x002b
+	// extEncryptedClientHello is draft-ietf-tls-esni's codepoint. Still a
+	// draft, but 0xfe0d is what Chrome, Firefox and Cloudflare have deployed,
+	// so it is what appears on the wire.
+	extEncryptedClientHello uint16 = 0xfe0d
+)
+
+// ECH client hello types, from the ECHClientHello structure.
+const (
+	echTypeOuter uint8 = 0
+	echTypeInner uint8 = 1
 )
 
 // ClientHello is the decoded subset of a TLS ClientHello needed to fingerprint
@@ -85,6 +95,27 @@ type ClientHello struct {
 	ALPN       []string
 	ServerName string
 	HasSNI     bool
+
+	// HasECH reports that the client offered Encrypted ClientHello.
+	//
+	// This matters more than it looks. When ECH is in use the ServerName above
+	// is the provider's public name, not the host the client actually wants,
+	// so every signal derived from it is describing the front door rather than
+	// the destination. The fingerprint itself still works, because it measures
+	// the shape of the hello rather than its contents.
+	//
+	// It cannot be told apart from GREASE ECH by watching. Clients send a
+	// decoy extension precisely so that a passive observer cannot distinguish
+	// "using ECH" from "exercising the code path", which is the point of the
+	// design and a limit on what this field can mean.
+	HasECH bool
+	// ECHConfigID identifies which of a provider's published configurations
+	// the client encrypted to. Only meaningful when ECHIsOuter.
+	ECHConfigID uint8
+	// ECHIsOuter distinguishes the outer hello, which is the only one an
+	// observer ever sees, from the inner one. An inner hello reaching this
+	// parser means something has already gone wrong upstream.
+	ECHIsOuter bool
 }
 
 // NegotiatedVersion returns the highest TLS version the client offered: the
@@ -280,6 +311,37 @@ func parseExtension(ch *ClientHello, etype uint16, data *cursor) {
 			if len(p) > 0 {
 				ch.ALPN = append(ch.ALPN, string(p))
 			}
+		}
+
+	case extEncryptedClientHello:
+		// ECHClientHello, draft-ietf-tls-esni:
+		//
+		//	struct {
+		//	    ECHClientHelloType type;          // outer(0) / inner(1)
+		//	    select (type) {
+		//	      case outer:
+		//	        HpkeSymmetricCipherSuite cipher_suite;  // 4 bytes
+		//	        uint8  config_id;
+		//	        opaque enc<0..2^16-1>;
+		//	        opaque payload<1..2^16-1>;
+		//	      case inner:
+		//	        Empty;
+		//	    };
+		//	} ECHClientHello;
+		//
+		// Only the leading type and, for an outer hello, the config id are
+		// read. The rest is a public key and a ciphertext, neither of which
+		// says anything to an observer, and walking further would be parsing
+		// for its own sake.
+		ch.HasECH = true
+		switch data.u8() {
+		case echTypeOuter:
+			ch.ECHIsOuter = true
+			data.skip(4) // HpkeSymmetricCipherSuite
+			ch.ECHConfigID = data.u8()
+		case echTypeInner:
+			// Nothing follows, and seeing one here would mean the inner hello
+			// arrived unencrypted.
 		}
 
 	case extSupportedVersions:

@@ -28,6 +28,23 @@ type helloSpec struct {
 	pointFormats      []uint8
 	supportedVersions []uint16
 	greaseExt         bool
+	// ech is the raw body of the encrypted_client_hello extension, or nil to
+	// leave it out.
+	ech []byte
+}
+
+// echOuter builds the body of an outer ECHClientHello: type, a 4-byte HPKE
+// symmetric cipher suite, the config id, then the public key and payload as
+// length-prefixed opaque blobs.
+func echOuter(configID uint8) []byte {
+	var b builder
+	b.u8(echTypeOuter)
+	b.u16(0x0001) // HKDF-SHA256
+	b.u16(0x0001) // AES-128-GCM
+	b.u8(configID)
+	b.lenPrefixed(2, func(w *builder) { w.raw(make([]byte, 32)) })  // enc
+	b.lenPrefixed(2, func(w *builder) { w.raw(make([]byte, 128)) }) // payload
+	return b.b
 }
 
 type builder struct{ b []byte }
@@ -125,6 +142,10 @@ func buildHello(s helloSpec) []byte {
 					}
 				})
 			})
+		}
+		if s.ech != nil {
+			exts.u16(extEncryptedClientHello)
+			exts.lenPrefixed(2, func(e *builder) { e.raw(s.ech) })
 		}
 		if s.greaseExt {
 			exts.u16(0x1a1a) // GREASE extension, must be ignored entirely
@@ -242,6 +263,99 @@ func TestServerNameOfLegalLengthIsUntouched(t *testing.T) {
 	}
 	if ch.ServerName != name {
 		t.Errorf("ServerName = %q, want %q", ch.ServerName, name)
+	}
+}
+
+// TestParsesEncryptedClientHello covers the extension that decides how much the
+// rest of this sensor's server-name evidence is worth.
+func TestParsesEncryptedClientHello(t *testing.T) {
+	s := goldenSpec()
+	s.ech = echOuter(42)
+
+	ch, err := ParseClientHello(buildHello(s))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !ch.HasECH {
+		t.Fatal("HasECH = false on a hello carrying the extension")
+	}
+	if !ch.ECHIsOuter {
+		t.Error("ECHIsOuter = false for an outer hello")
+	}
+	if ch.ECHConfigID != 42 {
+		t.Errorf("ECHConfigID = %d, want 42", ch.ECHConfigID)
+	}
+	// The SNI is still parsed and still reported. It is the provider's public
+	// name rather than the destination, which is what HasECH exists to say.
+	if ch.ServerName != "example.com" {
+		t.Errorf("ServerName = %q, want the outer name to survive", ch.ServerName)
+	}
+}
+
+// TestECHDoesNotDisturbTheFingerprint is the property that makes ECH survivable
+// for this tool. ECH hides where a client is going; it does not hide what the
+// client is, because JA4 measures the shape of the hello rather than its
+// contents. The extension is counted in the extension list like any other.
+func TestECHDoesNotDisturbTheFingerprint(t *testing.T) {
+	plain := goldenSpec()
+	withECH := goldenSpec()
+	withECH.ech = echOuter(7)
+
+	a, err := ParseClientHello(buildHello(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ParseClientHello(buildHello(withECH))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if a.HasECH {
+		t.Error("a hello without the extension reported HasECH")
+	}
+	// One more extension, so the fingerprints legitimately differ: a client
+	// that offers ECH really is a different client from one that does not.
+	if len(b.Extensions) != len(a.Extensions)+1 {
+		t.Errorf("extension count %d, want %d", len(b.Extensions), len(a.Extensions)+1)
+	}
+	if JA4(a, TransportTCP) == JA4(b, TransportTCP) {
+		t.Error("offering ECH left the fingerprint unchanged; the extension is not being counted")
+	}
+}
+
+// TestECHInnerTypeIsNotTreatedAsOuter guards the branch that should never fire
+// on a real network: an inner hello has no config id, and reading one would be
+// reporting a byte from someone else's field.
+func TestECHInnerTypeIsNotTreatedAsOuter(t *testing.T) {
+	s := goldenSpec()
+	s.ech = []byte{echTypeInner}
+
+	ch, err := ParseClientHello(buildHello(s))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !ch.HasECH {
+		t.Error("HasECH = false for an inner hello")
+	}
+	if ch.ECHIsOuter {
+		t.Error("an inner hello was reported as outer")
+	}
+	if ch.ECHConfigID != 0 {
+		t.Errorf("ECHConfigID = %d from an inner hello, which carries none", ch.ECHConfigID)
+	}
+}
+
+// TestECHTruncatedDoesNotPanic covers the usual hostile case: the extension is
+// attacker-supplied like everything else in a hello.
+func TestECHTruncatedDoesNotPanic(t *testing.T) {
+	full := echOuter(9)
+	for i := 0; i <= len(full); i++ {
+		s := goldenSpec()
+		s.ech = full[:i]
+		ch, err := ParseClientHello(buildHello(s))
+		if err == nil && ch == nil {
+			t.Fatalf("truncated to %d bytes: nil hello with nil error", i)
+		}
 	}
 }
 
