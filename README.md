@@ -495,6 +495,15 @@ The second test is the one that does the work. Any detector can be made to fire 
 lowering a threshold; staying quiet about the ordinary traffic sitting beside the attack
 is the difficult half.
 
+Where a fingerprint or a decryption has to agree with the rest of the world, the tests use
+somebody else's numbers rather than this project's. JA4 is checked against real Chrome
+hellos from FoxIO's own capture, requiring the fingerprints FoxIO's implementation
+produces, across four hellos chosen to differ from each other. QUIC Initial decryption is
+checked against the protected packets published in RFC 9001 and RFC 9369, requiring the
+plaintext those RFCs publish. Both matter for the same reason: every other test here is a
+round trip against this project's own encoder, and a round trip cannot catch a
+specification that was misread consistently.
+
 Coverage of the analysis packages: `pipeline` 90%, `fingerprint` 89%, `quic` 87%,
 `detect` 86%, `flow` 83%, `rules` 82%, `store` 81%, `api` 79%. Repository total 61%.
 
