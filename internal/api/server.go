@@ -331,6 +331,15 @@ func httpError(w http.ResponseWriter, code int, err error) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 }
 
+// maxLimit caps what a caller may ask for in one response.
+//
+// Without it an oversized limit degraded to no limit at all: Table.Snapshot
+// only narrows when limit < len(flows), so ?limit=99999999 copied the entire
+// flow table while holding the read lock that Table.Observe needs to write for
+// every packet. Detection stalls behind a request the caller chose the cost of.
+// The alert path was already bounded by construction; this is the outlier.
+const maxLimit = 5000
+
 func intParam(r *http.Request, name string, def int) int {
 	v := r.URL.Query().Get(name)
 	if v == "" {
@@ -340,5 +349,5 @@ func intParam(r *http.Request, name string, def int) int {
 	if err != nil || n <= 0 {
 		return def
 	}
-	return n
+	return min(n, maxLimit)
 }

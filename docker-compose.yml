@@ -15,6 +15,9 @@ services:
     image: tracehound:latest
     ports:
       - "8080:8080"
+    # A wildcard bind is required here and is safe here: a published port
+    # reaches the container's own interface, not loopback, and this service
+    # only ever replays the synthetic capture baked into the image.
     command: ["replay", "/demo.pcap", "-listen", ":8080", "-speed", "120"]
     restart: "no"
 
@@ -32,6 +35,11 @@ services:
       # Nothing else is needed — notably not root.
       - NET_RAW
       - NET_ADMIN
-    command: ["sniff", "-i", "eth0", "-listen", ":8080"]
+    # Loopback, not ":8080". Host networking means a wildcard bind here puts
+    # the unauthenticated dashboard on every interface of the machine being
+    # monitored, where anyone on that network can watch their own activity
+    # being detected. Loopback is still reachable from the host itself, which
+    # is where an operator is. See SECURITY.md.
+    command: ["sniff", "-i", "eth0", "-listen", "127.0.0.1:8080"]
     profiles: ["live"]
     restart: unless-stopped

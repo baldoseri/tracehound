@@ -474,7 +474,13 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 				fmt.Fprintf(os.Stderr, "tracehound: dashboard: %v\n", err)
 			}
 		}()
-		fmt.Fprintf(os.Stderr, "dashboard:  %s\n", browseURL(cf.listen))
+		scope, exposed := listenScope(cf.listen)
+		fmt.Fprintf(os.Stderr, "dashboard:  %s (%s)\n", browseURL(cf.listen), scope)
+		if exposed {
+			fmt.Fprintf(os.Stderr, "            warning: the dashboard and API are unauthenticated and\n")
+			fmt.Fprintf(os.Stderr, "            serve this network's inventory. Bind 127.0.0.1 and use an\n")
+			fmt.Fprintf(os.Stderr, "            authenticating proxy to reach it from elsewhere.\n")
+		}
 	}
 	if !cf.quiet && !cf.jsonOut {
 		fmt.Fprintln(os.Stderr)
@@ -673,6 +679,10 @@ func orNone(s string) string {
 }
 
 // browseURL turns a listen address into something clickable in a terminal.
+//
+// A wildcard bind is rewritten to localhost because that is the URL the
+// operator can actually click, not because it describes what is listening.
+// Anything printing this must say which it is: see listenScope.
 func browseURL(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -682,6 +692,35 @@ func browseURL(addr string) string {
 		host = "localhost"
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+// listenScope describes who can reach a listen address.
+//
+// This exists because browseURL prints "localhost" for a wildcard bind, which
+// told the operator the dashboard was on loopback while it was in fact on every
+// interface. The dashboard serves the internal address inventory, the MAC
+// addresses, the JA4s and a live feed of what has been detected, with no
+// authentication, and README's own live-sensor example uses a bare -listen. A
+// sensor that quietly publishes its findings to the network it is watching is
+// worth one line of output.
+func listenScope(addr string) (desc string, exposed bool) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "unknown interface", true
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return "all interfaces", true
+	}
+	if ip, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		if ip.IsLoopback() {
+			return "loopback only", false
+		}
+		return host, true
+	}
+	// A hostname. Resolving it to decide would mean a DNS lookup during
+	// startup, so assume the worse of the two and let the operator confirm.
+	return host, true
 }
 
 // sanitizeTerminal escapes control bytes so wire-controlled text cannot drive
