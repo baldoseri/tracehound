@@ -265,12 +265,18 @@ async function refresh() {
     // A fingerprint on exactly one host is what the rare-JA4 detector keys on;
     // highlighting it here lets an analyst see the same thing by eye.
     const users = new Map();
-    for (const d of devices) for (const j of d.ja4s || []) users.set(j, (users.get(j) || 0) + 1);
+    for (const d of devices) for (const j of d.client_ja4s || []) users.set(j, (users.get(j) || 0) + 1);
+
+    // Loudest host first. Address order buried the interesting machine under
+    // whatever happened to be numerically below it: on the demo capture the
+    // implant sits beneath fifty scan targets that sent sixty bytes each, so
+    // the payoff of the capture was below the fold.
+    devices.sort((a, b) => (b.bytes_sent || 0) - (a.bytes_sent || 0));
 
     $("c-dev").textContent = devices.length + " hosts";
     $("devices").innerHTML = devices.length
       ? devices.map((d) => {
-          const fps = (d.ja4s || []).map((j) =>
+          const fps = (d.client_ja4s || []).map((j) =>
             `<div class="ja4 ${users.get(j) === 1 ? "rare" : ""}"
                   title="${users.get(j)} host(s) use this stack">${esc(j)}</div>`).join("") || "—";
           return `<tr><td>${esc(d.addr)}</td><td>${fps}</td>

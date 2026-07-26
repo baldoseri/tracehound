@@ -702,6 +702,20 @@ func queryCmd(args []string) error {
 		return err
 	}
 
+	// Refuse to create one. store.Open makes the file if it is missing, which
+	// is right for a sensor starting a new capture and exactly wrong here: a
+	// mistyped path used to produce an empty database and report "0 shown of 0
+	// stored" with a zero exit code. During an incident that reads as "there
+	// were no findings", which is the one answer this tool must never give by
+	// accident.
+	if _, err := os.Stat(*dbPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("no database at %s (query reads an existing database; "+
+				"the sensor creates one with -db)", *dbPath)
+		}
+		return err
+	}
+
 	db, err := store.Open(*dbPath, store.Options{})
 	if err != nil {
 		return err

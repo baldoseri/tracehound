@@ -163,7 +163,12 @@ type Device struct {
 	// JA4s is the set of distinct TLS client fingerprints this host has
 	// presented. More than a handful usually means a multi-tenant host — or an
 	// implant using a different TLS stack than the browser next to it.
-	JA4s []string `json:"ja4s,omitempty"`
+	//
+	// Serialised as client_ja4s rather than ja4s. JA4S is a term of art for the
+	// *server* fingerprint, which is a different value carried on a flow, and
+	// an audience that knows the difference is exactly the audience reading
+	// this API.
+	JA4s []string `json:"client_ja4s,omitempty"`
 
 	BytesSent uint64 `json:"bytes_sent"`
 	BytesRecv uint64 `json:"bytes_recv"`
