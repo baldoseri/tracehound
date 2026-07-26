@@ -29,11 +29,17 @@ package fingerprint
 // That asymmetry is real in FoxIO's reference implementation, which routes JA4S
 // through a formatting helper and JA4 through one that filters GREASE first.
 //
-// Note on provenance: this was checked line by line against that reference
-// rather than against the prose specification, which is not public in the
-// detail needed to settle GREASE handling. The two implementations have not
-// been run over the same capture and diffed, so conformance is established by
-// reading, not by experiment.
+// Note on provenance, and it is weaker than the one for JA4. This was checked
+// line by line against that reference rather than against the prose
+// specification, which is not public in the detail needed to settle GREASE
+// handling, and no ServerHello has been run through both implementations and
+// diffed. Conformance here is established by reading.
+//
+// JA4 no longer relies on that: TestJA4AgainstFoxIOVectors runs real hellos
+// from FoxIO's own capture and requires the fingerprints FoxIO's implementation
+// produces. The same is not yet possible for JA4S, because FoxIO publish
+// expected JA4S values only as part of JA4+, which carries a different and
+// non-commercial licence. See testdata/foxio_ja4_vectors.txt.
 func JA4S(sh *ServerHello, transport Transport) string {
 	out := make([]byte, 0, ja4sLen)
 
