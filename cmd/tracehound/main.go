@@ -408,10 +408,10 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 		}
 		defer db.Close()
 
-		// Retention is enforced before the run rather than during it, so a
-		// long-lived sensor never competes with its own packet loop for the
-		// disk, and so an operator who lowers the limit sees it take effect on
-		// the next start rather than at some unpredictable later moment.
+		// Enforced once at startup so an operator who lowers a limit sees it
+		// take effect immediately, and then again on a timer for the whole run.
+		// See maintain: a limit that only holds between runs does not bound
+		// anything on a sensor that is meant to stay up.
 		if n, err := applyRetention(ctx, db, cf); err != nil {
 			return err
 		} else if n > 0 && !cf.quiet {
@@ -502,21 +502,24 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 		fmt.Fprintln(os.Stderr)
 	}
 
+	// Periodic upkeep runs alongside the capture and stops with it. A device's
+	// byte counters move on every packet, so the inventory is still written on
+	// a cadence rather than per change, which would make it the busiest table
+	// in the database for no analytical gain.
+	if db != nil {
+		maintainCtx, stopMaintain := context.WithCancel(ctx)
+		defer stopMaintain()
+		go maintain(maintainCtx, db, inventory, cf, saveDevicesEvery, applyRetentionEvery)
+	}
+
 	stats, err := p.Run(ctx, src)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 
-	// The inventory is written once, at the end. A device's byte counters move
-	// on every packet, so persisting each change would make this the busiest
-	// table in the database for no analytical gain.
-	if db != nil {
-		saveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := db.SaveDevices(saveCtx, inventory.Devices()); err != nil {
-			fmt.Fprintf(os.Stderr, "tracehound: could not save inventory: %v\n", err)
-		}
-		cancel()
-	}
+	// And once more at the end, so the last observations are not lost to
+	// whatever fraction of the interval had not elapsed.
+	saveDevices(ctx, db, inventory)
 
 	if !cf.quiet && !cf.jsonOut {
 		printSummary(stats, counts, total)
@@ -543,6 +546,77 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 		<-ctx.Done()
 	}
 	return nil
+}
+
+// Cadences for the periodic work. Both are far slower than anything on the
+// packet path and each does a single indexed statement, so neither competes
+// with capture for the disk in any way that matters.
+const (
+	saveDevicesEvery    = time.Minute
+	applyRetentionEvery = 5 * time.Minute
+)
+
+// maintain does the work a sensor that stays up has to do repeatedly.
+//
+// Both of these used to happen once and never again, which is the wrong shape
+// for the deployment the flags exist for. The inventory was written only after
+// Run returned, so the README's own sequence of "sniff -db" followed by "query
+// -db -devices" returned nothing for as long as the sensor was running, and a
+// process that was killed rather than stopped lost the inventory entirely.
+// Retention ran only at startup, so -db-max-alerts was described as a hard
+// ceiling while being nothing of the kind during a run: the compose deployment
+// restarts unless stopped, and between restarts the file grew without limit.
+//
+// The original reasoning for doing this at startup was to keep a long-lived
+// sensor from competing with its own packet loop for the disk. That argument
+// holds for VACUUM, which is why compaction is still a separate manual command,
+// but not for a bounded DELETE on an indexed column once every five minutes.
+// The intervals are parameters rather than read from the constants directly so
+// a test can drive several cycles without waiting minutes for them.
+func maintain(ctx context.Context, db *store.Store, inv *detect.Inventory, cf commonFlags,
+	deviceEvery, retentionEvery time.Duration,
+) {
+	devices := time.NewTicker(deviceEvery)
+	defer devices.Stop()
+	retention := time.NewTicker(retentionEvery)
+	defer retention.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-devices.C:
+			saveDevices(ctx, db, inv)
+
+		case <-retention.C:
+			if cf.dbRetention <= 0 && cf.dbMaxAlerts <= 0 {
+				continue
+			}
+			// Reported even under -quiet and -json. Those suppress the summary
+			// and choose an output format; neither is a request to hide a
+			// database that has stopped accepting writes.
+			if _, err := applyRetention(ctx, db, cf); err != nil && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "tracehound: retention: %v\n", err)
+			}
+		}
+	}
+}
+
+// saveDevices persists the asset inventory.
+//
+// Given its own context rather than the run's, so a shutdown triggered by
+// Ctrl-C still gets the inventory written instead of cancelling the write that
+// was the point of shutting down cleanly.
+func saveDevices(ctx context.Context, db *store.Store, inv *detect.Inventory) {
+	if db == nil || inv == nil {
+		return
+	}
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := db.SaveDevices(saveCtx, inv.Devices()); err != nil {
+		fmt.Fprintf(os.Stderr, "tracehound: could not save inventory: %v\n", err)
+	}
 }
 
 // applyRetention trims the store to the configured age and count limits.

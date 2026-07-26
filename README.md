@@ -217,7 +217,7 @@ Flows are deliberately not stored. A busy network produces millions a day, and
 keeping them is what a flow collector is for.
 
 A sensor left running would otherwise fill its disk, so retention is enforced at
-startup:
+startup and every five minutes thereafter:
 
 ```bash
 tracehound sniff -i eth0 -db findings.db -db-retention 720h -db-max-alerts 500000
@@ -230,6 +230,10 @@ findings than a normal month, and only the count ceiling caps that. Deleting
 rows frees pages for reuse without shrinking the file, which is the right
 default for a database still being written to, so compaction is a separate
 command rather than something that happens on a timer.
+
+The asset inventory is written on a one minute cadence rather than only at exit,
+so `query -devices` works against a sensor that is still running, and a process
+that is killed rather than stopped does not lose it.
 
 ## Why JA4 is worth the effort
 
