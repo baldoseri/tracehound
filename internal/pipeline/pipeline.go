@@ -31,6 +31,15 @@ type Options struct {
 	FlowIdleTimeout time.Duration
 	MaxFlows        int
 
+	// MaxPendingHandshakes bounds how many partial handshakes each reassembler
+	// buffers at once. Zero selects the package default.
+	//
+	// Configurable for the same reason MaxFlows is, and because a test that
+	// wants to prove behaviour at the bound cannot get there through a capture:
+	// filling the default would take more concurrent half-open TLS flows than
+	// any fixture contains.
+	MaxPendingHandshakes int
+
 	// TickInterval is how much *capture* time passes between detector scoring
 	// cycles. Driving ticks from packet timestamps rather than the wall clock
 	// is what makes a PCAP replay produce byte-identical results every run,
@@ -131,14 +140,34 @@ type Pipeline struct {
 // New builds a pipeline. Detectors must already be registered on the engine.
 func New(engine *detect.Engine, opts Options) *Pipeline {
 	opts = opts.withDefaults()
-	return &Pipeline{
+	p := &Pipeline{
 		opts:   opts,
 		engine: engine,
-		table:  flow.New(flow.Options{IdleTimeout: opts.FlowIdleTimeout, MaxFlows: opts.MaxFlows}),
-		reasm:  fingerprint.NewReassembler(0),
-		sreasm: fingerprint.NewServerReassembler(0),
-		qreasm: quic.NewReassembler(0),
+		reasm:  fingerprint.NewReassembler(opts.MaxPendingHandshakes),
+		sreasm: fingerprint.NewServerReassembler(opts.MaxPendingHandshakes),
+		qreasm: quic.NewReassembler(opts.MaxPendingHandshakes),
 	}
+	p.table = flow.New(flow.Options{
+		IdleTimeout: opts.FlowIdleTimeout,
+		MaxFlows:    opts.MaxFlows,
+		// Reaping was the only thing that released reassembler state, and
+		// eviction is not reaping. A flow dropped for capacity left its partial
+		// handshake behind forever, and eviction takes from the cold end of the
+		// LRU, which is exactly where a half-open TLS flow waiting for its
+		// second segment sits.
+		OnEvict: p.forget,
+	})
+	return p
+}
+
+// forget releases every piece of per-flow state held outside the flow table.
+//
+// Both callers matter and neither is sufficient alone: reaping handles flows
+// that go idle, eviction handles flows dropped under pressure.
+func (p *Pipeline) forget(key model.FlowKey) {
+	p.reasm.Forget(key)
+	p.sreasm.Forget(key)
+	p.qreasm.Forget(key)
 }
 
 // Table exposes the flow table for the API layer.
@@ -354,9 +383,7 @@ func (p *Pipeline) fingerprintServer(key model.FlowKey, pkt *model.Packet, f *mo
 func (p *Pipeline) reap(now time.Time) {
 	for _, f := range p.table.Reap(now) {
 		p.engine.FlowClosed(&f)
-		p.reasm.Forget(f.Key)
-		p.sreasm.Forget(f.Key)
-		p.qreasm.Forget(f.Key)
+		p.forget(f.Key)
 	}
 }
 
@@ -369,9 +396,7 @@ func (p *Pipeline) reap(now time.Time) {
 func (p *Pipeline) finish(src capture.Source, start time.Time) {
 	for _, f := range p.table.Drain() {
 		p.engine.FlowClosed(&f)
-		p.reasm.Forget(f.Key)
-		p.sreasm.Forget(f.Key)
-		p.qreasm.Forget(f.Key)
+		p.forget(f.Key)
 	}
 	if n := p.lastNano.Load(); n != 0 {
 		p.engine.Tick(time.Unix(0, n).UTC())

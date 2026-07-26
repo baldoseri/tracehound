@@ -22,6 +22,16 @@ var captureStart = time.Date(2026, 3, 14, 9, 0, 0, 0, time.UTC)
 // pipeline, returning the ground truth alongside what was actually detected.
 func replayDemo(t *testing.T) (pcapgen.Summary, []model.Alert, pipeline.Stats) {
 	t.Helper()
+	return replayDemoOpts(t, pipeline.Options{
+		TickInterval:    30 * time.Second,
+		FlowIdleTimeout: 2 * time.Minute,
+	})
+}
+
+// replayDemoOpts is replayDemo with the pipeline options exposed, so a test can
+// put the sensor under conditions the defaults never reach.
+func replayDemoOpts(t *testing.T, opts pipeline.Options) (pcapgen.Summary, []model.Alert, pipeline.Stats) {
+	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "demo.pcap")
 	f, err := os.Create(path)
@@ -57,10 +67,7 @@ func replayDemo(t *testing.T) (pcapgen.Summary, []model.Alert, pipeline.Stats) {
 	engine.Register(detect.NewExfil(detect.ExfilConfig{}))
 	engine.Register(detect.NewInventory(detect.InventoryConfig{}))
 
-	p := pipeline.New(engine, pipeline.Options{
-		TickInterval:    30 * time.Second,
-		FlowIdleTimeout: 2 * time.Minute,
-	})
+	p := pipeline.New(engine, opts)
 
 	stats, err := p.Run(context.Background(), src)
 	if err != nil {

@@ -35,6 +35,8 @@ type Reassembler struct {
 	// maxPending bounds how many partial handshakes we track at once, so a
 	// flood of half-open TLS connections cannot grow the map without limit.
 	maxPending int
+	// dropped counts handshakes discarded to stay under maxPending.
+	dropped uint64
 }
 
 // DefaultMaxPending is the number of in-progress handshakes tracked at once.
@@ -83,7 +85,17 @@ func (r *Reassembler) Feed(key model.FlowKey, payload []byte) *Result {
 			return nil
 		}
 		if len(r.pending) >= r.maxPending {
-			return nil
+			// Drop one partial handshake rather than refuse this flow.
+			//
+			// This check sits before ParseClientHello, so refusing meant that
+			// once the map filled, every subsequent flow went unfingerprinted
+			// including complete single-segment hellos. A full map became a
+			// permanent stop rather than a bound, and nothing emptied it except
+			// the flows already in it completing.
+			//
+			// Losing one buffered handshake costs a single fingerprint. Losing
+			// the map costs all of them, and silently.
+			r.evictOne()
 		}
 	}
 
@@ -119,8 +131,32 @@ func (r *Reassembler) Feed(key model.FlowKey, payload []byte) *Result {
 	return res
 }
 
+// evictOne drops a single buffered handshake to make room. Callers must hold
+// r.mu.
+//
+// The victim is whichever key Go's randomised map iteration offers first. An
+// LRU would pick better, but it would mean a timestamp and a list per entry to
+// improve a path that should be rare once evicted flows are released properly,
+// and picking badly here costs one fingerprint.
+func (r *Reassembler) evictOne() {
+	for k := range r.pending {
+		delete(r.pending, k)
+		r.dropped++
+		return
+	}
+}
+
+// Dropped reports how many partial handshakes were discarded for capacity.
+// A non-zero value means the sensor is losing client fingerprints.
+func (r *Reassembler) Dropped() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.dropped
+}
+
 // Forget drops any partial state for a flow. The pipeline calls this when a
-// flow is reaped so that handshakes that never completed do not linger.
+// flow is reaped or evicted, so that handshakes which never completed do not
+// linger.
 func (r *Reassembler) Forget(key model.FlowKey) {
 	r.mu.Lock()
 	delete(r.pending, key)

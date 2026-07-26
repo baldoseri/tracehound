@@ -28,6 +28,8 @@ type ServerReassembler struct {
 	mu         sync.Mutex
 	pending    map[model.FlowKey][]byte
 	maxPending int
+	// dropped counts handshakes discarded to stay under maxPending.
+	dropped uint64
 }
 
 // NewServerReassembler returns a ready ServerReassembler. maxPending <= 0
@@ -67,7 +69,14 @@ func (r *ServerReassembler) Feed(key model.FlowKey, payload []byte) *ServerResul
 			return nil
 		}
 		if len(r.pending) >= r.maxPending {
-			return nil
+			// Make room rather than refuse: see Reassembler.evictOne. This
+			// check sits before parsing, so refusing turned a full map into a
+			// permanent stop instead of a bound.
+			for k := range r.pending {
+				delete(r.pending, k)
+				r.dropped++
+				break
+			}
 		}
 	}
 

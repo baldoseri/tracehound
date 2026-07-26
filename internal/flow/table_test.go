@@ -27,6 +27,58 @@ func pkt(src netip.Addr, sport uint16, dst netip.Addr, dport uint16, flags uint8
 	}
 }
 
+// TestEvictionIsReported is the missing link that let reassembler state leak.
+//
+// Eviction dropped a flow and told nobody, so everything holding per-flow state
+// keyed off Reap and never heard about flows that did not go idle but were
+// pushed out under pressure. Eviction takes from the cold end of the LRU, which
+// is exactly where a half-open TLS flow waiting for its second segment sits.
+func TestEvictionIsReported(t *testing.T) {
+	var evicted []model.FlowKey
+	tbl := New(Options{
+		MaxFlows: 4,
+		OnEvict:  func(k model.FlowKey) { evicted = append(evicted, k) },
+	})
+
+	for i := 0; i < 20; i++ {
+		p := pkt(hostA, uint16(10000+i), hostB, 443, model.TCPSyn, time.Duration(i)*time.Second, 74)
+		tbl.Observe(&p)
+	}
+
+	if len(evicted) == 0 {
+		t.Fatal("no evictions reported; per-flow state held elsewhere would leak")
+	}
+	if got := tbl.Len(); got > 4 {
+		t.Errorf("table holds %d flows, want at most 4", got)
+	}
+
+	// A key reported as evicted must actually be gone, or a caller acting on
+	// the callback would drop state for a flow that is still live.
+	live := map[model.FlowKey]bool{}
+	for _, f := range tbl.Drain() {
+		live[f.Key] = true
+	}
+	for _, k := range evicted {
+		if live[k] {
+			t.Errorf("key %v reported evicted but is still in the table", k)
+		}
+	}
+}
+
+// TestNoEvictionCallbackWhenUnderCapacity guards the other direction: a table
+// that never fills must never report an eviction.
+func TestNoEvictionCallbackWhenUnderCapacity(t *testing.T) {
+	n := 0
+	tbl := New(Options{MaxFlows: 100, OnEvict: func(model.FlowKey) { n++ }})
+	for i := 0; i < 20; i++ {
+		p := pkt(hostA, uint16(10000+i), hostB, 443, model.TCPSyn, time.Duration(i)*time.Second, 74)
+		tbl.Observe(&p)
+	}
+	if n != 0 {
+		t.Errorf("%d evictions reported with 20 flows in a table of 100", n)
+	}
+}
+
 // TestBidirectionalFlowsShareOneEntry is the core invariant: a request and its
 // response are one conversation, not two.
 func TestBidirectionalFlowsShareOneEntry(t *testing.T) {

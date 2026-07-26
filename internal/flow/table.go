@@ -38,6 +38,13 @@ type Options struct {
 	// flows are evicted early. This bounds memory against a scan or a flood
 	// that would otherwise create millions of one-packet flows.
 	MaxFlows int
+	// OnEvict is called for each flow dropped to stay under MaxFlows.
+	//
+	// Eviction used to be silent, and everything holding per-flow state keyed
+	// off Reap instead, so an evicted flow's state was never released. It is
+	// called after the table's lock is dropped, so an implementation may take
+	// its own locks, and it must not call back into the table.
+	OnEvict func(model.FlowKey)
 }
 
 func (o Options) withDefaults() Options {
@@ -121,8 +128,12 @@ func (t *Table) Len() int {
 func (t *Table) Observe(p *model.Packet) (f *model.Flow, isNew bool) {
 	key, _ := model.KeyFor(p)
 
+	// Collected under the lock and reported after it, so a callback that takes
+	// its own locks cannot be ordered against this one. Nil on the overwhelming
+	// majority of packets, which is every packet that evicts nothing.
+	var evicted []model.FlowKey
+
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	e, ok := t.flows[key]
 	if !ok {
@@ -144,9 +155,18 @@ func (t *Table) Observe(p *model.Packet) (f *model.Flow, isNew bool) {
 		t.unlink(victim)
 		delete(t.flows, victim.flow.Key)
 		t.evicted++
+		if t.opts.OnEvict != nil {
+			evicted = append(evicted, victim.flow.Key)
+		}
 	}
 
-	return &e.flow, isNew
+	f = &e.flow
+	t.mu.Unlock()
+
+	for _, k := range evicted {
+		t.opts.OnEvict(k)
+	}
+	return f, isNew
 }
 
 // Reap removes every flow untouched since now-IdleTimeout and returns them.
