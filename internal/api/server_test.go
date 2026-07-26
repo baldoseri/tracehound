@@ -74,6 +74,61 @@ func newSensor(t *testing.T) (*api.Server, func()) {
 	return srv, run
 }
 
+// TestStatsReportsCaptureAndStore covers counters that were collected and never
+// exposed.
+//
+// Capture.Dropped is the kernel's count of traffic the sensor never saw, which
+// is the single most important thing an operator can learn from this endpoint,
+// and /api/stats had no capture block at all. The store block is absent rather
+// than zeroed when running without -db, so a caller can tell "nothing is being
+// persisted" from "persistence is working and idle".
+func TestStatsReportsCaptureAndStore(t *testing.T) {
+	srv, run := newSensor(t)
+	run()
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	get := func() map[string]json.RawMessage {
+		resp, err := http.Get(ts.URL + "/api/stats")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	stats := get()
+	raw, ok := stats["capture"]
+	if !ok {
+		t.Fatal("/api/stats has no capture block; kernel drops are invisible")
+	}
+	var capture struct {
+		Packets  uint64 `json:"packets"`
+		Dropped  uint64 `json:"dropped"`
+		Decoded  uint64 `json:"decoded"`
+		Undecode uint64 `json:"undecodable"`
+	}
+	if err := json.Unmarshal(raw, &capture); err != nil {
+		t.Fatal(err)
+	}
+	if capture.Packets == 0 {
+		t.Error("capture block reports no packets after a full replay")
+	}
+	if _, ok := stats["dropped"]; ok {
+		t.Error("dropped leaked to the top level; it belongs under capture")
+	}
+
+	// No database was attached, so the store block must be absent entirely.
+	if _, ok := stats["store"]; ok {
+		t.Error("a sensor with no -db reported a store block")
+	}
+}
+
 // TestLimitIsClamped covers the one endpoint whose response size a caller could
 // choose. Table.Snapshot only narrows when limit < len(flows), so an oversized
 // limit used to degrade to no limit at all and copy the whole flow table while

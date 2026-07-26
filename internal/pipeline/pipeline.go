@@ -240,6 +240,16 @@ func (p *Pipeline) Run(ctx context.Context, src capture.Source) (Stats, error) {
 	// lands exactly on a multiple.
 	const cancelCheckEvery = 512
 
+	// The source's own counters, kernel drops among them, used to be read once
+	// in finish. A live sensor therefore reported no drops for its entire run
+	// however far behind it fell, and the one number that says "this sensor is
+	// not seeing everything" was only available after it stopped.
+	//
+	// Sampled on a wall-clock interval rather than a packet count because
+	// reading them is a syscall on a live handle, and once a second is plenty
+	// for something a dashboard polls twice a second.
+	var lastSample time.Time
+
 	for n := uint64(0); ; n++ {
 		if n%cancelCheckEvery == 0 {
 			select {
@@ -247,6 +257,10 @@ func (p *Pipeline) Run(ctx context.Context, src capture.Source) (Stats, error) {
 				p.finish(src, start)
 				return p.Stats(), ctx.Err()
 			default:
+			}
+			if now := time.Now(); now.Sub(lastSample) >= time.Second {
+				lastSample = now
+				p.sampleCapture(src)
 			}
 		}
 
@@ -402,11 +416,23 @@ func (p *Pipeline) finish(src capture.Source, start time.Time) {
 		p.engine.Tick(time.Unix(0, n).UTC())
 	}
 
+	p.sampleCapture(src)
+
+	p.mu.Lock()
+	p.elapsed = time.Since(start)
+	p.mu.Unlock()
+}
+
+// sampleCapture refreshes the counters owned by the source.
+//
+// Safe to call repeatedly: LiveSource accumulates the kernel's destructive
+// drop counter internally, so each call returns the running total rather than
+// the delta since the previous one.
+func (p *Pipeline) sampleCapture(src capture.Source) {
 	cs := src.Stats()
 	p.nUndecodable.Store(cs.Undecode)
 
 	p.mu.Lock()
 	p.capture = cs
-	p.elapsed = time.Since(start)
 	p.mu.Unlock()
 }

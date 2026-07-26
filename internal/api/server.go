@@ -23,6 +23,7 @@ import (
 	"github.com/baldoseri/tracehound/internal/detect"
 	"github.com/baldoseri/tracehound/internal/model"
 	"github.com/baldoseri/tracehound/internal/pipeline"
+	"github.com/baldoseri/tracehound/internal/store"
 )
 
 //go:embed web
@@ -43,6 +44,22 @@ type Server struct {
 	subs      map[chan model.Alert]struct{}
 
 	started time.Time
+
+	// storeStats reports persistence counters, or is nil when the sensor is
+	// running without a database. Set once during startup, before any handler
+	// can run, so it needs no lock.
+	storeStats func() store.Stats
+}
+
+// WithStore makes persistence counters visible on /api/stats.
+//
+// Taken as a dependency rather than reached for, because the API has no other
+// reason to know a database exists.
+func (s *Server) WithStore(db *store.Store) *Server {
+	if db != nil {
+		s.storeStats = db.Stats
+	}
+	return s
 }
 
 // New returns a server backed by a running pipeline.
@@ -201,22 +218,32 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	total := len(s.alerts)
 	s.mu.RUnlock()
 
-	writeJSON(w, map[string]any{
+	out := map[string]any{
 		"packets":             st.Packets,
 		"bytes":               st.Bytes,
 		"undecodable":         st.Undecodable,
 		"fingerprints":        st.Fingerprints,
 		"server_fingerprints": st.ServerFingerprints,
-		"flows":               st.Flow,
-		"detect":              st.Detect,
-		"first_packet":        st.FirstPacket,
-		"last_packet":         st.LastPacket,
-		"packets_per_sec":     st.PacketsPerSecond(),
-		"alerts_total":        total,
-		"alerts_by_severity":  counts,
-		"uptime_seconds":      int(time.Since(s.started).Seconds()),
-		"detectors":           s.eng.Detectors(),
-	})
+		// The source's own view, kernel drops included. A sensor that cannot
+		// keep up is the single most important thing an operator can learn
+		// from this endpoint, and it was the one thing not on it.
+		"capture":            st.Capture,
+		"flows":              st.Flow,
+		"detect":             st.Detect,
+		"first_packet":       st.FirstPacket,
+		"last_packet":        st.LastPacket,
+		"packets_per_sec":    st.PacketsPerSecond(),
+		"alerts_total":       total,
+		"alerts_by_severity": counts,
+		"uptime_seconds":     int(time.Since(s.started).Seconds()),
+		"detectors":          s.eng.Detectors(),
+	}
+	// Absent rather than zeroed when running without -db, so a caller can tell
+	// "nothing is being persisted" from "persistence is working and idle".
+	if s.storeStats != nil {
+		out["store"] = s.storeStats()
+	}
+	writeJSON(w, out)
 }
 
 // handleAttack summarises ATT&CK coverage: which techniques this sensor has

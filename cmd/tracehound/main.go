@@ -475,7 +475,7 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 	}
 
 	if cf.listen != "" {
-		dash = api.New(p, engine, inventory, 0)
+		dash = api.New(p, engine, inventory, 0).WithStore(db)
 		// Replay stored findings into the dashboard so a restarted sensor
 		// opens showing what it already knows instead of an empty page.
 		if db != nil {
@@ -521,20 +521,29 @@ func run(src capture.Source, cf commonFlags, banner string) error {
 	// whatever fraction of the interval had not elapsed.
 	saveDevices(ctx, db, inventory)
 
+	if db != nil {
+		// Flush before reporting anything, so the numbers describe what is on
+		// disk rather than what is still queued. Close is guarded by a sync.Once
+		// and is also deferred, so calling it here is safe.
+		if err := db.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "tracehound: closing database: %v\n", err)
+		}
+		// Reported whatever the output mode. -json is the documented way to feed
+		// a SIEM and -quiet the documented way to run as a daemon, and those
+		// were the two modes in which "the disk is full and nothing is being
+		// persisted" was silent.
+		if st := db.Stats(); st.Dropped > 0 || st.Failed > 0 {
+			fmt.Fprintf(os.Stderr,
+				"tracehound: storage could not keep up: %d findings dropped, %d failed to write\n",
+				st.Dropped, st.Failed)
+		}
+	}
+
 	if !cf.quiet && !cf.jsonOut {
 		printSummary(stats, counts, total)
 		if db != nil {
-			// Flush before reporting, so the numbers describe what is on disk
-			// rather than what is still queued.
-			if err := db.Close(); err != nil {
-				fmt.Fprintf(os.Stderr, "tracehound: closing database: %v\n", err)
-			}
 			st := db.Stats()
-			fmt.Fprintf(os.Stderr, "stored     %d findings in %s", st.Written, cf.dbPath)
-			if st.Dropped > 0 || st.Failed > 0 {
-				fmt.Fprintf(os.Stderr, " (%d dropped, %d failed)", st.Dropped, st.Failed)
-			}
-			fmt.Fprintln(os.Stderr)
+			fmt.Fprintf(os.Stderr, "stored     %d findings in %s\n", st.Written, cf.dbPath)
 		}
 	}
 
@@ -924,6 +933,15 @@ func printAlert(a model.Alert) {
 func printSummary(s pipeline.Stats, counts map[model.Severity]int, total int) {
 	fmt.Fprintf(os.Stderr, "---\n")
 	fmt.Fprintf(os.Stderr, "packets    %d (%s, %d undecodable)\n", s.Packets, humanBytes(s.Bytes), s.Undecodable)
+	// Kernel drops mean the sensor did not see the traffic at all, which is a
+	// different and worse thing than failing to decode it. The counter was
+	// collected and never printed, so a sensor falling behind looked identical
+	// to one keeping up.
+	if s.Capture.Dropped > 0 {
+		pct := 100 * float64(s.Capture.Dropped) / float64(s.Capture.Dropped+s.Packets)
+		fmt.Fprintf(os.Stderr, "dropped    %d by the kernel (%.1f%% of offered traffic; the sensor is behind)\n",
+			s.Capture.Dropped, pct)
+	}
 	if !s.FirstPacket.IsZero() {
 		fmt.Fprintf(os.Stderr, "capture    %s .. %s (%s)\n",
 			s.FirstPacket.Format(time.RFC3339), s.LastPacket.Format(time.RFC3339),
