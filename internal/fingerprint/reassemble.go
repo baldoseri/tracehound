@@ -13,6 +13,10 @@ type Result struct {
 	JA3Raw     string
 	ServerName string
 	ALPN       string
+	// HasECH reports that the client offered Encrypted ClientHello, which
+	// means ServerName above is the provider's public name rather than the
+	// host the client actually wanted.
+	HasECH bool
 }
 
 // Reassembler collects the leading client bytes of TCP flows until a complete
@@ -124,6 +128,7 @@ func (r *Reassembler) Feed(key model.FlowKey, payload []byte) *Result {
 		JA3:        ja3,
 		JA3Raw:     ja3raw,
 		ServerName: ch.ServerName,
+		HasECH:     ch.HasECH,
 	}
 	if len(ch.ALPN) > 0 {
 		res.ALPN = ch.ALPN[0]

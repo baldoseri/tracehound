@@ -93,6 +93,7 @@ func (r *Reassembler) Feed(key model.FlowKey, datagram []byte) *fingerprint.Resu
 		JA3:        ja3,
 		JA3Raw:     ja3raw,
 		ServerName: ch.ServerName,
+		HasECH:     ch.HasECH,
 	}
 	if len(ch.ALPN) > 0 {
 		res.ALPN = ch.ALPN[0]

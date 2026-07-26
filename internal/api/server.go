@@ -224,6 +224,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"undecodable":         st.Undecodable,
 		"fingerprints":        st.Fingerprints,
 		"server_fingerprints": st.ServerFingerprints,
+		"ech_clients":         st.ECHClients,
 		// The source's own view, kernel drops included. A sensor that cannot
 		// keep up is the single most important thing an operator can learn
 		// from this endpoint, and it was the one thing not on it.
