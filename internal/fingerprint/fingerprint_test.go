@@ -505,6 +505,53 @@ func testKey(t *testing.T) model.FlowKey {
 // TestReassemblerSplitAcrossSegments is the regression test for the bug this
 // component exists to prevent: a ClientHello that arrives in two TCP segments
 // must produce the same fingerprint as one that arrives whole.
+// TestReassemblerAtCapacityStillFingerprints covers what made the eviction leak
+// fatal rather than merely wasteful.
+//
+// The capacity check runs before ParseClientHello, so refusing a new flow when
+// the map was full meant a complete single-segment hello was dropped without
+// being looked at. Nothing emptied the map except the flows already in it
+// completing, so once full it stayed full and client fingerprinting stopped for
+// the life of the process. Making room instead costs one buffered handshake.
+func TestReassemblerAtCapacityStillFingerprints(t *testing.T) {
+	const capacity = 4
+	r := NewReassembler(capacity)
+
+	// Fill it with handshakes that will never complete: a record header
+	// announcing far more than it carries.
+	partial := []byte{0x16, 0x03, 0x01, 0x10, 0x00}
+	for i := 0; i < capacity; i++ {
+		k, _ := model.NewFlowKey(
+			netip.MustParseAddr("10.0.0.5"), uint16(40000+i),
+			netip.MustParseAddr("93.184.216.34"), 443,
+			model.ProtoTCP,
+		)
+		if res := r.Feed(k, partial); res != nil {
+			t.Fatal("a truncated record produced a fingerprint")
+		}
+	}
+	if got := r.Pending(); got != capacity {
+		t.Fatalf("Pending() = %d, want the map full at %d", got, capacity)
+	}
+
+	// A complete hello from a new flow must still be fingerprinted.
+	fresh, _ := model.NewFlowKey(
+		netip.MustParseAddr("10.0.0.9"), 55555,
+		netip.MustParseAddr("93.184.216.34"), 443,
+		model.ProtoTCP,
+	)
+	res := r.Feed(fresh, buildHello(goldenSpec()))
+	if res == nil {
+		t.Fatal("a full map refused a complete ClientHello; fingerprinting has stopped")
+	}
+	if res.JA4 == "" {
+		t.Error("fingerprint returned with an empty JA4")
+	}
+	if r.Dropped() == 0 {
+		t.Error("Dropped() = 0; the eviction was not counted, so the loss is invisible")
+	}
+}
+
 func TestReassemblerSplitAcrossSegments(t *testing.T) {
 	raw := buildHello(goldenSpec())
 	key := testKey(t)

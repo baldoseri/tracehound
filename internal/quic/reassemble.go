@@ -20,6 +20,8 @@ type Reassembler struct {
 	mu         sync.Mutex
 	pending    map[model.FlowKey]*cryptoStream
 	maxPending int
+	// dropped counts CRYPTO streams discarded to stay under maxPending.
+	dropped uint64
 }
 
 // NewReassembler returns a ready Reassembler. max <= 0 selects the default.
@@ -49,8 +51,15 @@ func (r *Reassembler) Feed(key model.FlowKey, datagram []byte) *fingerprint.Resu
 	stream, tracking := r.pending[key]
 	if !tracking {
 		if len(r.pending) >= r.maxPending {
-			r.mu.Unlock()
-			return nil
+			// Make room rather than refuse, mirroring the TCP reassembler.
+			// Refusing turned a full map into a permanent stop: the check runs
+			// before any parsing, so nothing new could ever be fingerprinted
+			// again while the map stayed full.
+			for k := range r.pending {
+				delete(r.pending, k)
+				r.dropped++
+				break
+			}
 		}
 		stream = &cryptoStream{}
 		r.pending[key] = stream
