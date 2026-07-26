@@ -10,10 +10,20 @@ import (
 	"fmt"
 )
 
-// Version1 is the only QUIC version handled here (RFC 9000). Draft versions and
-// QUIC v2 use different initial salts, so treating them as v1 would derive
-// wrong keys and produce garbage rather than a clean failure.
-const Version1 uint32 = 0x00000001
+// The QUIC versions handled here.
+//
+// Draft versions use their own salts again and are still rejected, because
+// deriving keys with the wrong salt produces garbage rather than a clean
+// failure, and a sensor that silently reports nonsense is worse than one that
+// says it does not understand the packet.
+const (
+	// Version1 is RFC 9000.
+	Version1 uint32 = 0x00000001
+	// Version2 is RFC 9369. The number is the first four bytes of the
+	// SHA-256 of "QUICv2 version number", chosen to be unguessable so that
+	// middleboxes cannot pattern-match on it.
+	Version2 uint32 = 0x6b3343cf
+)
 
 // initialSaltV1 is the salt for deriving Initial keys in QUIC v1, from
 // RFC 9001 section 5.2. It is a constant published in the specification, not a
@@ -21,6 +31,50 @@ const Version1 uint32 = 0x00000001
 var initialSaltV1 = []byte{
 	0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
 	0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a,
+}
+
+// initialSaltV2 is the equivalent for QUIC v2, from RFC 9369 section 3.3.1.
+// It is the first 20 bytes of the SHA-256 of "QUICv2 salt".
+var initialSaltV2 = []byte{
+	0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93,
+	0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9,
+}
+
+// versionParams is everything that differs between the two versions.
+//
+// Changing the salt alone is not enough, and getting that wrong is the kind of
+// mistake that authenticates nothing and looks like a decryption bug. RFC 9369
+// section 3.3.2 also renames every key-derivation label, and section 3.2
+// renumbers the long header packet types, so an Initial is 0b01 in v2 where it
+// is 0b00 in v1.
+type versionParams struct {
+	salt        []byte
+	keyLabel    string
+	ivLabel     string
+	hpLabel     string
+	initialType byte // already shifted into the long-header type field
+}
+
+func paramsFor(version uint32) (versionParams, bool) {
+	switch version {
+	case Version1:
+		return versionParams{
+			salt:        initialSaltV1,
+			keyLabel:    "quic key",
+			ivLabel:     "quic iv",
+			hpLabel:     "quic hp",
+			initialType: longTypeInitialV1,
+		}, true
+	case Version2:
+		return versionParams{
+			salt:        initialSaltV2,
+			keyLabel:    "quicv2 key",
+			ivLabel:     "quicv2 iv",
+			hpLabel:     "quicv2 hp",
+			initialType: longTypeInitialV2,
+		}, true
+	}
+	return versionParams{}, false
 }
 
 // keys holds the client Initial secrets for one connection.
@@ -43,19 +97,23 @@ type keys struct {
 //	key                   = HKDF-Expand-Label(client_initial_secret, "quic key", "", 16)
 //	iv                    = HKDF-Expand-Label(client_initial_secret, "quic iv",  "", 12)
 //	hp                    = HKDF-Expand-Label(client_initial_secret, "quic hp",  "", 16)
+//
+// The "client in" label is deliberately not versioned: RFC 9369 changes the
+// packet protection labels but leaves the secret derivation alone.
 func deriveClientInitialKeys(version uint32, dcid []byte) (*keys, error) {
-	if version != Version1 {
+	p, ok := paramsFor(version)
+	if !ok {
 		return nil, fmt.Errorf("quic: unsupported version %#08x", version)
 	}
 
-	initialSecret := hkdfExtract(initialSaltV1, dcid)
+	initialSecret := hkdfExtract(p.salt, dcid)
 	clientSecret := hkdfExpandLabel(initialSecret, "client in", 32)
 
 	k := &keys{
 		secret: clientSecret,
-		key:    hkdfExpandLabel(clientSecret, "quic key", 16),
-		iv:     hkdfExpandLabel(clientSecret, "quic iv", 12),
-		hp:     hkdfExpandLabel(clientSecret, "quic hp", 16),
+		key:    hkdfExpandLabel(clientSecret, p.keyLabel, 16),
+		iv:     hkdfExpandLabel(clientSecret, p.ivLabel, 12),
+		hp:     hkdfExpandLabel(clientSecret, p.hpLabel, 16),
 	}
 
 	block, err := aes.NewCipher(k.key)

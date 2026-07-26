@@ -513,9 +513,9 @@ reproducible.
 TCP stream reassembly stops after the ClientHello. That is enough to fingerprint a
 client but not to analyse the payload of a protocol.
 
-QUIC support covers version 1 client Initials only. Draft versions and QUIC v2 use
-different initial salts, so they are rejected rather than decrypted with the wrong keys,
-and everything after the handshake is protected by keys an observer never sees.
+QUIC support covers client Initials for version 1 and version 2. Draft versions use their
+own salts again and are rejected rather than decrypted with the wrong keys, and
+everything after the handshake is protected by keys an observer never sees.
 
 IP fragments are not reassembled. IPv6 extension header chains are walked, so a first
 fragment decodes normally, but a non-initial fragment carries no transport header and is
@@ -537,9 +537,10 @@ your own traffic looks like.
 ## Roadmap
 
 - JA4H, the HTTP variant
-- QUIC v2 and the draft versions, which need only their own initial salts
 - A detector for known client and server fingerprint pairs, once there is a feed
   to check them against
+- Encrypted ClientHello, which is the thing most likely to make this whole
+  approach less useful and is worth measuring before it does
 
 ## License
 

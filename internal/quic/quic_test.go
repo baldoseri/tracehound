@@ -55,10 +55,44 @@ func TestInitialKeySchedule(t *testing.T) {
 }
 
 func TestUnsupportedVersionIsRejected(t *testing.T) {
-	// Draft versions and QUIC v2 use different salts, so deriving v1 keys for
-	// them would silently produce wrong keys rather than an honest failure.
-	if _, err := deriveClientInitialKeys(0x6b3343cf, []byte{1, 2, 3, 4}); err == nil {
-		t.Error("a non-v1 version was accepted")
+	// Every version has its own salt and labels, so deriving keys for an
+	// unknown one would silently produce wrong keys rather than an honest
+	// failure. This test previously used 0x6b3343cf as its example of an
+	// unsupported version; that is QUIC v2, which is now supported, so it has
+	// been replaced with versions that really are not.
+	for _, v := range []uint32{
+		0x00000000, // Version Negotiation, never a real packet version
+		0xff00001d, // draft-29
+		0xff00001b, // draft-27
+		0x00000002, // not a QUIC version; v2 is 0x6b3343cf
+		0x6b3343ce, // one below v2, to catch a range check where equality is meant
+	} {
+		if _, err := deriveClientInitialKeys(v, []byte{1, 2, 3, 4}); err == nil {
+			t.Errorf("version %#08x was accepted", v)
+		}
+	}
+}
+
+func TestSupportedVersionsDeriveKeys(t *testing.T) {
+	for _, v := range []uint32{Version1, Version2} {
+		k, err := deriveClientInitialKeys(v, []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08})
+		if err != nil {
+			t.Errorf("version %#08x: %v", v, err)
+			continue
+		}
+		if len(k.key) != 16 || len(k.iv) != 12 || len(k.hp) != 16 {
+			t.Errorf("version %#08x: key/iv/hp are %d/%d/%d bytes",
+				v, len(k.key), len(k.iv), len(k.hp))
+		}
+	}
+
+	// The same connection ID under the two versions must not produce the same
+	// keys, which is the whole point of changing the salt and the labels.
+	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+	k1, _ := deriveClientInitialKeys(Version1, dcid)
+	k2, _ := deriveClientInitialKeys(Version2, dcid)
+	if bytes.Equal(k1.key, k2.key) || bytes.Equal(k1.hp, k2.hp) {
+		t.Error("v1 and v2 derived identical keys from the same connection ID")
 	}
 }
 
