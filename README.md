@@ -20,14 +20,38 @@ redraws whatever it printed, so it stays in sync with the code.*
 
 ---
 
+## Install
+
+Download a binary for your platform from the
+[latest release](https://github.com/baldoseri/tracehound/releases/latest). They are
+statically linked, need no libpcap, and each release ships a `SHA256SUMS.txt`:
+
+```bash
+sha256sum -c SHA256SUMS.txt
+```
+
+Or build it, which needs Go 1.26 or newer and nothing else:
+
+```bash
+go install github.com/baldoseri/tracehound/cmd/tracehound@latest
+```
+
+Then:
+
+```bash
+tracehound gen-demo demo.pcap && tracehound replay demo.pcap
+```
+
 ## Quick start
+
+From a clone, if you have `make`:
 
 ```bash
 git clone https://github.com/baldoseri/tracehound && cd tracehound
 make demo
 ```
 
-That builds the binary, generates a synthetic capture containing real attacker
+Either route builds the binary, generates a synthetic capture containing real attacker
 behaviour, and analyses it. You do not need a network to sniff or a malware sample to
 download.
 
