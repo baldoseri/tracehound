@@ -85,7 +85,7 @@ jobs:
         run: go tool cover -func=coverage.out | tail -n 20
 
   fuzz:
-    name: fuzz the TLS parser
+    name: fuzz the wire parsers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,17 +94,35 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      # A short run on every PR. The parser reads attacker-controlled bytes off
-      # the wire, so "it never panics" has to be continuously re-established,
-      # not asserted once.
-      - run: go test ./internal/fingerprint -run '^$' -fuzz FuzzParseClientHello -fuzztime 90s
+      # A short run on every PR. These parsers read attacker-controlled bytes
+      # off the wire, so "it never panics" has to be continuously
+      # re-established, not asserted once.
+      #
+      # Every target that reads untrusted input is here. Only the ClientHello
+      # one used to be, which meant the ServerHello parser and the whole QUIC
+      # path were written to be fuzzed and then never were on a pull request.
+      - name: fuzz the parsers
+        run: |
+          set -e
+          fuzz() {
+            echo "::group::$2"
+            go test "$1" -run '^$' -fuzz "$2" -fuzztime 45s
+            echo "::endgroup::"
+          }
+          fuzz ./internal/fingerprint FuzzParseClientHello
+          fuzz ./internal/fingerprint FuzzParseServerHello
+          fuzz ./internal/quic        FuzzParseInitial
+          fuzz ./internal/quic        FuzzParseFrames
 
       - name: upload crashers
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-crashers
-          path: internal/fingerprint/testdata/fuzz/
+          path: |
+            internal/fingerprint/testdata/fuzz/
+            internal/quic/testdata/fuzz/
+          if-no-files-found: ignore
 
   build:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
