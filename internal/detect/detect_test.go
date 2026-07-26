@@ -769,6 +769,108 @@ func seedTLSHostAt(e *Engine, host netip.Addr, ja4 string, n int, first time.Tim
 	}
 }
 
+// TestSuppressionMemoryIsBounded covers the map that had no delete anywhere.
+//
+// One entry per distinct detector, rule and pair of addresses, kept for the life
+// of the process. The key includes both addresses, so its size is chosen by
+// whoever generates the traffic rather than by the sensor.
+func TestSuppressionMemoryIsBounded(t *testing.T) {
+	col := &collector{}
+	const cap = 100
+	e := NewEngine(Config{AlertCooldown: time.Hour, MaxSuppressionEntries: cap}, col.emit)
+
+	for i := 0; i < 2000; i++ {
+		a := baseAlert()
+		a.Detector = "test"
+		a.Src = netip.AddrFrom4([4]byte{10, 1, byte(i / 256), byte(i % 256)})
+		a.Time = t0.Add(time.Duration(i) * time.Second)
+		e.emit(a)
+	}
+
+	e.mu.Lock()
+	held := len(e.lastSeen)
+	dropped := e.dropped
+	e.mu.Unlock()
+
+	if held > cap {
+		t.Errorf("suppression memory holds %d entries with a cap of %d", held, cap)
+	}
+	if held == 0 {
+		t.Error("suppression memory was emptied entirely; nothing would ever be suppressed")
+	}
+	if dropped == 0 {
+		t.Error("dropped = 0 after 2000 distinct findings through a cap of 100")
+	}
+	t.Logf("held %d of 2000 distinct findings, dropped %d", held, dropped)
+}
+
+// TestSuppressionSurvivesTheBoundForActiveFindings is the property that makes
+// bounding by count rather than by age the right choice: a finding that keeps
+// recurring must stay suppressed even while unrelated ones churn through the
+// map, or the noise TestSuppressionDropsUnchangedEvidence exists to stop comes
+// straight back.
+func TestSuppressionSurvivesTheBoundForActiveFindings(t *testing.T) {
+	col := &collector{}
+	e := NewEngine(Config{AlertCooldown: time.Hour, MaxSuppressionEntries: 100}, col.emit)
+
+	hot := baseAlert()
+	hot.Detector = "test"
+	hot.Time = t0
+
+	e.emit(hot) // first sighting: reported
+	for i := 0; i < 500; i++ {
+		a := baseAlert()
+		a.Detector = "test"
+		a.Src = netip.AddrFrom4([4]byte{10, 2, byte(i / 256), byte(i % 256)})
+		a.Time = t0.Add(time.Duration(i+1) * time.Second)
+		e.emit(a)
+
+		// Keep restating the same finding. It must never be reported twice.
+		hot.Time = a.Time
+		e.emit(hot)
+	}
+
+	var n int
+	for _, a := range col.all() {
+		if a.Src == hot.Src && a.Dst == hot.Dst {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the recurring finding was reported %d times, want 1", n)
+	}
+}
+
+// TestBeaconEvidenceIsBounded documents that beaconTrack.starts is trimmed to
+// History on every tick, and that a track with nothing left is dropped.
+//
+// Worth pinning: starts is appended to on the packet path with no cap beside
+// it, which reads like the unbounded twin of the 512-entry cap on sizes. It is
+// not — trimBefore in OnTick is what bounds it — and the next person to audit
+// this file should not have to re-derive that.
+func TestBeaconEvidenceIsBounded(t *testing.T) {
+	b := NewBeacon(BeaconConfig{History: 5 * time.Minute})
+	e, _ := newTestEngine(b)
+
+	f := outboundFlow(inside, 51000, outside, 443)
+	at := t0
+	for i := 0; i < 5000; i++ {
+		p := tcpPacket(inside, 51000, outside, 443, model.TCPSyn, at)
+		e.Packet(&p, &f, true)
+		at = at.Add(time.Second)
+	}
+	e.Tick(at)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k, tr := range b.tracks {
+		// 5000 seconds of connections through a five minute window.
+		if len(tr.starts) > 400 {
+			t.Errorf("track %v holds %d starts after a 5m window; evidence is not being trimmed", k, len(tr.starts))
+		}
+	}
+}
+
 func TestInventoryFlagsRareJA4(t *testing.T) {
 	in := NewInventory(InventoryConfig{SilenceNewDevice: true})
 	e, col := newTestEngine(in)
@@ -815,6 +917,34 @@ func TestInventoryFlagsRareJA4(t *testing.T) {
 // at once. The first one to do so presented a fingerprint no other host had yet,
 // the network baseline already existed from the TCP stacks, and the detector
 // reported an ordinary browser as an implant. A new stack is not a rare stack.
+// TestInventoryFingerprintMapIsBounded covers the map that sat beside a capped
+// one and had no cap of its own.
+//
+// MaxDevices bounds the device map because a network holds only so many hosts.
+// Nothing bounded the fingerprint map, and that is the wrong way round: a host
+// that varies its TLS stack, or an attacker who chooses to, can mint
+// fingerprints indefinitely.
+func TestInventoryFingerprintMapIsBounded(t *testing.T) {
+	const cap = 50
+	in := NewInventory(InventoryConfig{SilenceNewDevice: true, MaxFingerprints: cap})
+	e, _ := newTestEngine(in)
+
+	host := netip.MustParseAddr("10.0.0.77")
+	for i := 0; i < 500; i++ {
+		seedTLSHost(e, host, fmt.Sprintf("t13d1516h2_%012x_%012x", i, i), 1)
+	}
+
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if got := len(in.ja4); got > cap {
+		t.Errorf("fingerprint map holds %d entries with a cap of %d", got, cap)
+	}
+	if got := len(in.devices[host].JA4s); got > in.cfg.MaxJA4sPerDevice {
+		t.Errorf("device holds %d fingerprints with a per-device cap of %d",
+			got, in.cfg.MaxJA4sPerDevice)
+	}
+}
+
 func TestInventoryWaitsForFingerprintToAge(t *testing.T) {
 	in := NewInventory(InventoryConfig{SilenceNewDevice: true})
 	e, col := newTestEngine(in)
