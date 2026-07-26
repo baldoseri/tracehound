@@ -182,10 +182,22 @@ something away when you had not, so the loader refuses rather than guesses.
 Findings survive a restart when you point the sensor at a database:
 
 ```bash
-tracehound sniff -i eth0 -db findings.db -listen :8080
+tracehound sniff -i eth0 -db findings.db -listen 127.0.0.1:8080
 tracehound query -db findings.db -min-severity high -since 24h
 tracehound query -db findings.db -devices
 ```
+
+Note the loopback bind. The dashboard and API have no authentication, and they
+serve this network's address inventory, MAC addresses, fingerprints and a live
+feed of what has been detected. An attacker on the network being watched can use
+that feed to see their own activity being caught, in real time, and stop before
+anyone acts on it.
+
+A bare `-listen :8080` binds every interface, which is ordinary Go behaviour and
+is kept so the container deployment keeps working, but the sensor prints a
+warning when it does. To reach the dashboard from another machine, put an
+authenticating reverse proxy in front of a loopback bind. [SECURITY.md](SECURITY.md)
+sets out the trust boundary in full.
 
 The dashboard reloads stored findings on startup, so a restarted sensor opens
 showing what it already knows rather than an empty page.

@@ -74,6 +74,47 @@ func newSensor(t *testing.T) (*api.Server, func()) {
 	return srv, run
 }
 
+// TestLimitIsClamped covers the one endpoint whose response size a caller could
+// choose. Table.Snapshot only narrows when limit < len(flows), so an oversized
+// limit used to degrade to no limit at all and copy the whole flow table while
+// holding the read lock that Observe needs to write for every packet.
+func TestLimitIsClamped(t *testing.T) {
+	srv, run := newSensor(t)
+	run()
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	count := func(path string) int {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: status %d", path, resp.StatusCode)
+		}
+		var rows []json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		return len(rows)
+	}
+
+	// Alerts, not flows: the flow table is drained when the run finishes, so a
+	// count taken here would be zero whatever the limit did, and the assertion
+	// would pass without testing anything. The clamp itself is covered directly
+	// in limit_test.go; this is the end-to-end half, that a caller's limit
+	// still reaches the handler and is honoured.
+	all := count("/api/alerts?limit=99999999")
+	if all == 0 {
+		t.Fatal("the demo capture produced no alerts to page through")
+	}
+	if got := count("/api/alerts?limit=2"); got != 2 {
+		t.Errorf("alerts ?limit=2 returned %d, want 2", got)
+	}
+}
+
 // TestAPIServesWhilePipelineRuns is the test the earlier suite was missing.
 //
 // Every other test either runs the pipeline or exercises the API, never both at

@@ -54,9 +54,11 @@ func run(readme, bin, pcap string) error {
 	}
 
 	if bin == "" {
-		if bin, err = buildBinary(root); err != nil {
+		var cleanup func()
+		if bin, cleanup, err = buildBinary(root); err != nil {
 			return fmt.Errorf("building tracehound: %w", err)
 		}
+		defer cleanup()
 	}
 	if bin, err = filepath.Abs(bin); err != nil {
 		return err
@@ -172,19 +174,25 @@ func splice(doc, name, body string) (string, error) {
 	return doc[:i] + begin + "\n\n```\n" + body + "\n```\n\n" + doc[j:], nil
 }
 
-func buildBinary(root string) (string, error) {
+// buildBinary compiles the sensor into a temporary directory and returns a
+// function that removes it. CI runs this on every pull request, so leaving the
+// directory behind would accumulate a copy of the binary per run.
+func buildBinary(root string) (string, func(), error) {
 	dir, err := os.MkdirTemp("", "readmegen")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
+	cleanup := func() { os.RemoveAll(dir) }
+
 	bin := filepath.Join(dir, "tracehound")
 	if runtime.GOOS == "windows" {
 		bin += ".exe"
 	}
 	if _, err := runCmd(root, "go", "build", "-o", bin, "./cmd/tracehound"); err != nil {
-		return "", err
+		cleanup()
+		return "", nil, err
 	}
-	return bin, nil
+	return bin, cleanup, nil
 }
 
 func runCmd(dir, name string, args ...string) (string, error) {
